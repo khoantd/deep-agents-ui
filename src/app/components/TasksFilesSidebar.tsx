@@ -30,13 +30,25 @@ export function FilesPopover({
   editDisabled: boolean;
 }) {
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
+  
+  // Use ref to store current files to avoid dependency on files in callback
+  const filesRef = useRef(files);
+  const setFilesRef = useRef(setFiles);
+  
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+  
+  useEffect(() => {
+    setFilesRef.current = setFiles;
+  }, [setFiles]);
 
   const handleSaveFile = useCallback(
     async (fileName: string, content: string) => {
-      await setFiles({ ...files, [fileName]: content });
+      await setFilesRef.current({ ...filesRef.current, [fileName]: content });
       setSelectedFile({ path: fileName, content: content });
     },
-    [files, setFiles]
+    [] // Empty deps - use refs to access latest values
   );
 
   return (

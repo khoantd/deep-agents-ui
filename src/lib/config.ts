@@ -14,7 +14,13 @@ export function getConfig(): StandaloneConfig | null {
 
   try {
     return JSON.parse(stored);
-  } catch {
+  } catch (parseError) {
+    if (parseError instanceof SyntaxError) {
+      console.warn(
+        `Failed to parse config: ${parseError.message}. Clearing corrupted config.`
+      );
+      localStorage.removeItem(CONFIG_KEY);
+    }
     return null;
   }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { extractStringFromMessageContent } from "@/app/utils/utils";
+import { useAuth } from "@/providers/AuthProvider";
 
 const THREAD_SERVICE_BASE_URL =
   process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "") || null;
@@ -18,9 +19,20 @@ function loadSyncedIds(threadId: string): Set<string> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return new Set();
-    const parsed = JSON.parse(raw) as Record<string, string[]>;
-    return new Set(parsed[threadId] ?? []);
-  } catch {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, string[]>;
+      return new Set(parsed[threadId] ?? []);
+    } catch (parseError) {
+      if (parseError instanceof SyntaxError) {
+        console.warn(
+          `Failed to parse synced message IDs: ${parseError.message}. Clearing corrupted data.`
+        );
+        localStorage.removeItem(STORAGE_KEY);
+      }
+      return new Set();
+    }
+  } catch (error) {
+    console.warn("Error loading synced message IDs:", error);
     return new Set();
   }
 }
@@ -29,11 +41,27 @@ function persistSyncedIds(threadId: string, ids: Set<string>): void {
   if (typeof window === "undefined") return;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    const parsed: Record<string, string[]> = raw ? JSON.parse(raw) : {};
+    let parsed: Record<string, string[]> = {};
+    if (raw) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch (parseError) {
+        if (parseError instanceof SyntaxError) {
+          console.warn(
+            `Failed to parse synced message IDs for persistence: ${parseError.message}. Starting fresh.`
+          );
+          // Clear corrupted data and start fresh
+          parsed = {};
+        } else {
+          throw parseError;
+        }
+      }
+    }
     parsed[threadId] = Array.from(ids);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
-  } catch {
+  } catch (error) {
     // Ignore serialization errors to avoid disrupting the UI
+    console.warn("Error persisting synced message IDs:", error);
   }
 }
 
@@ -70,6 +98,7 @@ export function useThreadPersistence({
   assistantName,
   messages,
 }: ThreadPersistenceOptions) {
+  const { accessToken } = useAuth();
   const createdThreadsRef = useRef<Set<string>>(new Set());
   const syncedIdsRef = useRef<Set<string>>(new Set());
   const lastThreadRef = useRef<string | null>(null);
@@ -82,7 +111,7 @@ export function useThreadPersistence({
   }, [threadId]);
 
   useEffect(() => {
-    if (!THREAD_SERVICE_BASE_URL || !threadId || messages.length === 0) {
+    if (!THREAD_SERVICE_BASE_URL || !threadId || messages.length === 0 || !accessToken) {
       return;
     }
 
@@ -96,14 +125,17 @@ export function useThreadPersistence({
       try {
         const response = await fetch(`${THREAD_SERVICE_BASE_URL}/threads`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
           body: JSON.stringify({
-            id: threadId,
             title: deriveThreadTitle(messages),
             summary: deriveSummary(messages),
             metadata: {
               assistant_id: assistantId,
               source: "deepagents-ui",
+              langgraph_thread_id: threadId, // Store LangGraph thread ID in metadata
             },
             participants: [
               { role: "user", display_name: "User" },
@@ -153,7 +185,10 @@ export function useThreadPersistence({
             `${THREAD_SERVICE_BASE_URL}/threads/${threadId}/messages`,
             {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${accessToken}`,
+              },
               body: JSON.stringify(payload),
             }
           );
@@ -175,6 +210,6 @@ export function useThreadPersistence({
     return () => {
       cancelled = true;
     };
-  }, [assistantId, assistantName, messages, threadId]);
+  }, [assistantId, assistantName, messages, threadId, accessToken]);
 }
 

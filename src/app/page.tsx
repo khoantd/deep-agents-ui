@@ -20,10 +20,15 @@ import { CommandPalette } from "@/app/components/CommandPalette";
 import { Breadcrumb } from "@/app/components/Breadcrumb";
 import { useThreads } from "@/app/hooks/useThreads";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { ProtectedRoute } from "@/app/components/ProtectedRoute";
+import { useAuth } from "@/providers/AuthProvider";
+import { UserProfile } from "@/app/components/UserProfile";
 
 function HomePageContent() {
+  const { user } = useAuth();
   const [config, setConfig] = useState<StandaloneConfig | null>(null);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
+  const [userProfileOpen, setUserProfileOpen] = useState(false);
   const [debugMode, _] = useState(false);
   const [assistantId, setAssistantId] = useQueryState("assistantId");
   const [_threadId, setThreadId] = useQueryState("threadId");
@@ -156,6 +161,10 @@ function HomePageContent() {
         onSave={handleSaveConfig}
         initialConfig={config}
       />
+      <UserProfile
+        open={userProfileOpen}
+        onOpenChange={setUserProfileOpen}
+      />
       <CommandPalette
         open={commandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
@@ -195,6 +204,23 @@ function HomePageContent() {
                 {config.assistantId}
               </div>
               <ThemeToggle />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setUserProfileOpen(true)}
+                className="flex items-center gap-2"
+              >
+                {user?.avatar_url ? (
+                  <img
+                    src={user.avatar_url}
+                    alt={user.name || "User"}
+                    className="h-4 w-4 rounded-full"
+                  />
+                ) : (
+                  <span className="h-4 w-4 rounded-full bg-primary"></span>
+                )}
+                {user?.name || "Profile"}
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -273,14 +299,16 @@ function HomePageContent() {
 
 export default function HomePage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex h-screen items-center justify-center">
-          <p className="text-muted-foreground">Loading...</p>
-        </div>
-      }
-    >
-      <HomePageContent />
-    </Suspense>
+    <ProtectedRoute>
+      <Suspense
+        fallback={
+          <div className="flex h-screen items-center justify-center">
+            <p className="text-muted-foreground">Loading...</p>
+          </div>
+        }
+      >
+        <HomePageContent />
+      </Suspense>
+    </ProtectedRoute>
   );
 }

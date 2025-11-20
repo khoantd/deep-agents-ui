@@ -50,16 +50,31 @@ export function useMessageInteractions(threadId?: string | null) {
         setState(DEFAULT_STATE);
         return;
       }
-      const parsed = JSON.parse(raw) as Partial<MessageMetaState>;
-      setState({
-        reactions: parsed.reactions ?? {},
-        bookmarks: parsed.bookmarks ?? {},
-        threads: {
-          replies: parsed.threads?.replies ?? {},
-          parents: parsed.threads?.parents ?? {},
-        },
-      });
-    } catch {
+      try {
+        const parsed = JSON.parse(raw) as Partial<MessageMetaState>;
+        setState({
+          reactions: parsed.reactions ?? {},
+          bookmarks: parsed.bookmarks ?? {},
+          threads: {
+            replies: parsed.threads?.replies ?? {},
+            parents: parsed.threads?.parents ?? {},
+          },
+        });
+      } catch (parseError) {
+        // Log the error for debugging but don't crash the UI
+        if (parseError instanceof SyntaxError) {
+          console.warn(
+            `Failed to parse message metadata for thread ${threadId}:`,
+            parseError.message
+          );
+          // Clear corrupted data
+          window.localStorage.removeItem(`${STORAGE_PREFIX}:${threadId}`);
+        }
+        setState(DEFAULT_STATE);
+      }
+    } catch (error) {
+      // Fallback for any other errors
+      console.warn("Error loading message metadata:", error);
       setState(DEFAULT_STATE);
     }
   }, [threadId]);

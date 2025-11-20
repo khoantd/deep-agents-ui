@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useCallback, useState, useEffect } from "react";
+import React, { useMemo, useCallback, useState, useEffect, useRef } from "react";
 import { FileText, Copy, Download, Edit, Save, X, Loader2 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -72,10 +72,29 @@ export const FileViewDialog = React.memo<{
     }
   );
 
+  // Track previous file values to prevent unnecessary state updates
+  const prevFilePathRef = useRef<string | undefined>(file?.path);
+  const prevFileContentRef = useRef<string | undefined>(file?.content);
+  const prevFileNullRef = useRef<boolean>(file === null);
+
   useEffect(() => {
-    setFileName(String(file?.path || ""));
-    setFileContent(String(file?.content || ""));
-    setIsEditingMode(file === null);
+    const currentPath = file?.path;
+    const currentContent = file?.content;
+    const currentIsNull = file === null;
+
+    // Only update state if values actually changed to prevent infinite loops
+    if (prevFilePathRef.current !== currentPath) {
+      setFileName(String(currentPath || ""));
+      prevFilePathRef.current = currentPath;
+    }
+    if (prevFileContentRef.current !== currentContent) {
+      setFileContent(String(currentContent || ""));
+      prevFileContentRef.current = currentContent;
+    }
+    if (prevFileNullRef.current !== currentIsNull) {
+      setIsEditingMode(currentIsNull);
+      prevFileNullRef.current = currentIsNull;
+    }
   }, [file]);
 
   const fileExtension = useMemo(() => {

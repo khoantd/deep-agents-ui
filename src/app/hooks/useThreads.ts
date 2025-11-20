@@ -2,6 +2,8 @@ import useSWRInfinite from "swr/infinite";
 import type { Thread } from "@langchain/langgraph-sdk";
 import { Client } from "@langchain/langgraph-sdk";
 import { getConfig } from "@/lib/config";
+import { useAuth } from "@/providers/AuthProvider";
+import { safeResponseJson } from "@/lib/jsonUtils";
 
 export interface ThreadItem {
   id: string;
@@ -14,31 +16,105 @@ export interface ThreadItem {
 
 const DEFAULT_PAGE_SIZE = 20;
 
+const THREAD_SERVICE_BASE_URL =
+  process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "") || null;
+
+// Map thread service status to LangGraph status
+function mapThreadServiceStatusToLangGraphStatus(
+  status: "open" | "paused" | "closed"
+): Thread["status"] {
+  switch (status) {
+    case "open":
+      return "idle";
+    case "paused":
+      return "interrupted";
+    case "closed":
+      return "idle";
+    default:
+      return "idle";
+  }
+}
+
+// Map LangGraph status filter to thread service status
+function mapLangGraphStatusToThreadServiceStatus(
+  status?: Thread["status"]
+): "open" | "paused" | "closed" | undefined {
+  switch (status) {
+    case "idle":
+      return "open"; // Map idle to open for thread service
+    case "interrupted":
+      return "paused";
+    case "error":
+      return undefined; // Thread service doesn't have error status
+    case "busy":
+      return "open"; // Map busy to open
+    default:
+      return undefined;
+  }
+}
+
 export function useThreads(props: {
   status?: Thread["status"];
   limit?: number;
 }) {
   const pageSize = props.limit || DEFAULT_PAGE_SIZE;
+  const { accessToken } = useAuth();
+  const config = getConfig();
+
+  // Determine if we should use thread service (authenticated) or LangGraph (fallback)
+  const useThreadService = !!(
+    THREAD_SERVICE_BASE_URL &&
+    accessToken &&
+    config
+  );
+
+  // Debug logging to help diagnose issues
+  if (THREAD_SERVICE_BASE_URL && !accessToken) {
+    console.warn("[ThreadService] Thread service URL is configured but no access token is available. Falling back to LangGraph only.");
+  }
+  if (accessToken && !THREAD_SERVICE_BASE_URL) {
+    console.warn("[ThreadService] Access token is available but thread service URL is not configured. Using LangGraph only.");
+  }
+
+  const apiKey =
+    config?.langsmithApiKey ||
+    process.env.NEXT_PUBLIC_LANGSMITH_API_KEY ||
+    "";
 
   return useSWRInfinite(
     (pageIndex: number, previousPageData: ThreadItem[] | null) => {
-      const config = getConfig();
-      const apiKey =
-        config?.langsmithApiKey ||
-        process.env.NEXT_PUBLIC_LANGSMITH_API_KEY ||
-        "";
-
-      if (!config || !apiKey) {
-        return null;
-      }
-
       // If the previous page returned no items, we've reached the end
       if (previousPageData && previousPageData.length === 0) {
         return null;
       }
 
+      if (!config) {
+        return null;
+      }
+
+      if (useThreadService) {
+        // When authenticated, fetch from both thread service and LangGraph, then merge
+        return {
+          kind: "merged" as const,
+          pageIndex,
+          pageSize,
+          baseUrl: THREAD_SERVICE_BASE_URL!,
+          accessToken: accessToken!,
+          deploymentUrl: config.deploymentUrl,
+          assistantId: config.assistantId,
+          apiKey: apiKey || "",
+          status: props?.status,
+          threadServiceStatus: mapLangGraphStatusToThreadServiceStatus(props?.status),
+        };
+      }
+
+      // Fallback to LangGraph only when not authenticated
+      if (!apiKey) {
+        return null;
+      }
+
       return {
-        kind: "threads" as const,
+        kind: "langgraph" as const,
         pageIndex,
         pageSize,
         deploymentUrl: config.deploymentUrl,
@@ -47,80 +123,200 @@ export function useThreads(props: {
         status: props?.status,
       };
     },
-    async ({
-      deploymentUrl,
-      assistantId,
-      apiKey,
-      status,
-      pageIndex,
-      pageSize,
-    }: {
-      kind: "threads";
-      pageIndex: number;
-      pageSize: number;
-      deploymentUrl: string;
-      assistantId: string;
-      apiKey: string;
-      status?: Thread["status"];
-    }) => {
-      const client = new Client({
-        apiUrl: deploymentUrl,
-        defaultHeaders: {
-          "X-Api-Key": apiKey,
-        },
-      });
-
-      const threads = await client.threads.search({
-        limit: pageSize,
-        offset: pageIndex * pageSize,
-        sortBy: "updated_at",
-        sortOrder: "desc",
-        status,
-        metadata: { assistant_id: assistantId },
-      });
-
-      return threads.map((thread): ThreadItem => {
-        let title = "Untitled Thread";
-        let description = "";
-
-        try {
-          if (thread.values && typeof thread.values === "object") {
-            const values = thread.values as any;
-            const firstHumanMessage = values.messages.find(
-              (m: any) => m.type === "human"
-            );
-            if (firstHumanMessage?.content) {
-              const content =
-                typeof firstHumanMessage.content === "string"
-                  ? firstHumanMessage.content
-                  : firstHumanMessage.content[0]?.text || "";
-              title = content.slice(0, 50) + (content.length > 50 ? "..." : "");
-            }
-            const firstAiMessage = values.messages.find(
-              (m: any) => m.type === "ai"
-            );
-            if (firstAiMessage?.content) {
-              const content =
-                typeof firstAiMessage.content === "string"
-                  ? firstAiMessage.content
-                  : firstAiMessage.content[0]?.text || "";
-              description = content.slice(0, 100);
-            }
-          }
-        } catch {
-          // Fallback to thread ID
-          title = `Thread ${thread.thread_id.slice(0, 8)}`;
+    async (key: any) => {
+      if (key.kind === "merged") {
+        // Fetch from both thread service and LangGraph, then merge
+        const { baseUrl, accessToken, pageIndex, pageSize, deploymentUrl, assistantId, apiKey, status, threadServiceStatus } = key;
+        
+        // Fetch from thread service
+        const threadServiceParams = new URLSearchParams({
+          limit: pageSize.toString(),
+          offset: (pageIndex * pageSize).toString(),
+        });
+        if (threadServiceStatus) {
+          threadServiceParams.append("status", threadServiceStatus);
         }
 
-        return {
-          id: thread.thread_id,
-          updatedAt: new Date(thread.updated_at),
-          status: thread.status,
-          title,
-          description,
-          assistantId,
-        };
-      });
+        let threadServiceThreads: ThreadItem[] = [];
+        try {
+          const threadServiceResponse = await fetch(`${baseUrl}/threads?${threadServiceParams}`, {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+          });
+
+          if (threadServiceResponse.ok) {
+            const threadServiceData = await safeResponseJson<{ threads?: any[]; total?: number }>(threadServiceResponse, { threads: [] });
+            if (!threadServiceData) {
+              console.warn("[ThreadService] Failed to parse thread service response");
+              threadServiceThreads = [];
+            } else {
+              const threadsArray = threadServiceData.threads || [];
+              console.log(`[ThreadService] Fetched ${threadsArray.length} threads (total: ${threadServiceData.total ?? 'unknown'})`);
+              threadServiceThreads = threadsArray.map((thread: any): ThreadItem => {
+                const assistantIdFromMeta = thread.metadata?.assistant_id || assistantId;
+                const langgraphThreadId = thread.metadata?.langgraph_thread_id;
+                const threadId = langgraphThreadId || thread.id;
+
+                return {
+                  id: threadId,
+                  updatedAt: new Date(thread.updated_at),
+                  status: mapThreadServiceStatusToLangGraphStatus(thread.status),
+                  title: thread.title || "Untitled Thread",
+                  description: thread.summary || "",
+                  assistantId: assistantIdFromMeta,
+                };
+              });
+            }
+          } else {
+            const errorText = await threadServiceResponse.text().catch(() => "Unknown error");
+            console.error(
+              `[ThreadService] Failed to fetch threads: ${threadServiceResponse.status} ${threadServiceResponse.statusText}`,
+              errorText
+            );
+          }
+        } catch (error) {
+          console.error("[ThreadService] Failed to fetch threads from thread service", error);
+        }
+
+        // Fetch from LangGraph
+        let langGraphThreads: ThreadItem[] = [];
+        try {
+          const client = new Client({
+            apiUrl: deploymentUrl,
+            defaultHeaders: {
+              "X-Api-Key": apiKey,
+            },
+          });
+
+          const langGraphResults = await client.threads.search({
+            limit: pageSize,
+            offset: pageIndex * pageSize,
+            sortBy: "updated_at",
+            sortOrder: "desc",
+            status,
+            metadata: { assistant_id: assistantId },
+          });
+
+          langGraphThreads = langGraphResults.map((thread): ThreadItem => {
+            let title = "Untitled Thread";
+            let description = "";
+
+            try {
+              if (thread.values && typeof thread.values === "object") {
+                const values = thread.values as any;
+                const firstHumanMessage = values.messages.find(
+                  (m: any) => m.type === "human"
+                );
+                if (firstHumanMessage?.content) {
+                  const content =
+                    typeof firstHumanMessage.content === "string"
+                      ? firstHumanMessage.content
+                      : firstHumanMessage.content[0]?.text || "";
+                  title = content.slice(0, 50) + (content.length > 50 ? "..." : "");
+                }
+                const firstAiMessage = values.messages.find(
+                  (m: any) => m.type === "ai"
+                );
+                if (firstAiMessage?.content) {
+                  const content =
+                    typeof firstAiMessage.content === "string"
+                      ? firstAiMessage.content
+                      : firstAiMessage.content[0]?.text || "";
+                  description = content.slice(0, 100);
+                }
+              }
+            } catch {
+              title = `Thread ${thread.thread_id.slice(0, 8)}`;
+            }
+
+            return {
+              id: thread.thread_id,
+              updatedAt: new Date(thread.updated_at),
+              status: thread.status,
+              title,
+              description,
+              assistantId,
+            };
+          });
+        } catch (error) {
+          console.warn("[LangGraph] Failed to fetch threads from LangGraph", error);
+        }
+
+        // Merge and deduplicate: prioritize thread service threads, but include LangGraph threads not in thread service
+        const threadServiceThreadIds = new Set(threadServiceThreads.map(t => t.id));
+        const uniqueLangGraphThreads = langGraphThreads.filter(t => !threadServiceThreadIds.has(t.id));
+        
+        // Combine: thread service threads first (more up-to-date), then unique LangGraph threads
+        const merged = [...threadServiceThreads, ...uniqueLangGraphThreads];
+        
+        // Sort by updatedAt descending
+        merged.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+        
+        return merged;
+      } else if (key.kind === "langgraph") {
+        // Fetch from LangGraph (fallback)
+        const { deploymentUrl, assistantId, apiKey, status, pageIndex, pageSize } = key;
+        const client = new Client({
+          apiUrl: deploymentUrl,
+          defaultHeaders: {
+            "X-Api-Key": apiKey,
+          },
+        });
+
+        const threads = await client.threads.search({
+          limit: pageSize,
+          offset: pageIndex * pageSize,
+          sortBy: "updated_at",
+          sortOrder: "desc",
+          status,
+          metadata: { assistant_id: assistantId },
+        });
+
+        return threads.map((thread): ThreadItem => {
+          let title = "Untitled Thread";
+          let description = "";
+
+          try {
+            if (thread.values && typeof thread.values === "object") {
+              const values = thread.values as any;
+              const firstHumanMessage = values.messages.find(
+                (m: any) => m.type === "human"
+              );
+              if (firstHumanMessage?.content) {
+                const content =
+                  typeof firstHumanMessage.content === "string"
+                    ? firstHumanMessage.content
+                    : firstHumanMessage.content[0]?.text || "";
+                title = content.slice(0, 50) + (content.length > 50 ? "..." : "");
+              }
+              const firstAiMessage = values.messages.find(
+                (m: any) => m.type === "ai"
+              );
+              if (firstAiMessage?.content) {
+                const content =
+                  typeof firstAiMessage.content === "string"
+                    ? firstAiMessage.content
+                    : firstAiMessage.content[0]?.text || "";
+                description = content.slice(0, 100);
+              }
+            }
+          } catch {
+            // Fallback to thread ID
+            title = `Thread ${thread.thread_id.slice(0, 8)}`;
+          }
+
+          return {
+            id: thread.thread_id,
+            updatedAt: new Date(thread.updated_at),
+            status: thread.status,
+            title,
+            description,
+            assistantId,
+          };
+        });
+      }
     },
     {
       revalidateFirstPage: true,

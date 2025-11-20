@@ -440,11 +440,43 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
                 toolCall.name ||
                 toolCall.type ||
                 "unknown";
-              const args =
-                toolCall.function?.arguments ||
-                toolCall.args ||
-                toolCall.input ||
-                {};
+              
+              // Safely extract and parse arguments
+              let args: Record<string, unknown> = {};
+              try {
+                const rawArgs =
+                  toolCall.function?.arguments ||
+                  toolCall.args ||
+                  toolCall.input ||
+                  {};
+                
+                // If args is a string, try to parse it as JSON
+                if (typeof rawArgs === "string") {
+                  try {
+                    args = JSON.parse(rawArgs);
+                  } catch (parseError) {
+                    // If parsing fails, log a warning and use the raw string
+                    if (parseError instanceof SyntaxError) {
+                      console.warn(
+                        `Failed to parse tool call arguments for ${name}:`,
+                        parseError.message
+                      );
+                      args = { _raw: rawArgs.substring(0, 1000) };
+                    } else {
+                      args = { _raw: String(rawArgs).substring(0, 1000) };
+                    }
+                  }
+                } else if (typeof rawArgs === "object" && rawArgs !== null) {
+                  // Already an object, use as-is
+                  args = rawArgs as Record<string, unknown>;
+                } else {
+                  args = { _value: rawArgs };
+                }
+              } catch (error) {
+                console.warn(`Error processing tool call arguments for ${name}:`, error);
+                args = { _error: "Failed to process arguments" };
+              }
+              
               return {
                 id: toolCall.id || `tool-${Math.random()}`,
                 name,

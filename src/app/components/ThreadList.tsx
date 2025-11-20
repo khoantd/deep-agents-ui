@@ -34,6 +34,7 @@ import {
 import { ThreadActions } from "@/app/components/ThreadActions";
 import { useClient } from "@/providers/ClientProvider";
 import { getConfig } from "@/lib/config";
+import { useAuth } from "@/providers/AuthProvider";
 import useSWR from "swr";
 
 type StatusFilter = "all" | "idle" | "busy" | "interrupted" | "error" | "completed";
@@ -268,6 +269,7 @@ export function ThreadList({
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const client = useClient();
   const config = getConfig();
+  const { accessToken } = useAuth();
 
   const threads = useThreads({
     // Map "completed" to "idle" since LangGraph uses "idle" for completed threads
@@ -293,9 +295,54 @@ export function ThreadList({
         return null; // Already in list, no need to add
       }
       
+      // Determine the actual LangGraph thread ID to use
+      let langgraphThreadId = currentThreadId;
+      
+      // If currentThreadId looks like a UUID (thread service ID), try to get langgraph_thread_id
+      // UUID format: 8-4-4-4-12 hex digits
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (uuidPattern.test(currentThreadId)) {
+        // This might be a thread service UUID, try to fetch from thread service to get langgraph_thread_id
+        const threadServiceUrl = process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "");
+        
+        if (threadServiceUrl && accessToken) {
+          try {
+            const response = await fetch(`${threadServiceUrl}/threads/${currentThreadId}`, {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                "Content-Type": "application/json",
+              },
+            });
+            
+            if (response.ok) {
+              const threadData = await response.json();
+              const langgraphId = threadData.metadata?.langgraph_thread_id;
+              if (langgraphId) {
+                langgraphThreadId = langgraphId;
+                console.log(`[ThreadService] Resolved thread service UUID ${currentThreadId} to LangGraph ID ${langgraphThreadId}`);
+              } else {
+                // Thread exists in thread service but has no LangGraph ID - can't fetch from LangGraph
+                console.warn(`[ThreadService] Thread ${currentThreadId} exists in thread service but has no langgraph_thread_id, cannot fetch from LangGraph`);
+                return null;
+              }
+            } else if (response.status === 404) {
+              // Thread doesn't exist in thread service - might be a LangGraph-only thread
+              console.log(`[ThreadService] Thread ${currentThreadId} not found in thread service, trying LangGraph directly`);
+              // Continue to try LangGraph with original ID
+            } else {
+              console.warn(`[ThreadService] Failed to fetch thread ${currentThreadId} from thread service: ${response.status} ${response.statusText}`);
+              // Continue to try LangGraph with original ID
+            }
+          } catch (error) {
+            console.warn(`[ThreadService] Error fetching thread ${currentThreadId} from thread service:`, error);
+            // Continue to try LangGraph with original ID
+          }
+        }
+      }
+      
       try {
-        // Try to get thread state - this is the most reliable way to fetch a thread
-        const state = await client.threads.getState(currentThreadId);
+        // Try to get thread state using the LangGraph thread ID
+        const state = await client.threads.getState(langgraphThreadId);
         
         if (!state) return null;
 
@@ -338,17 +385,30 @@ export function ThreadList({
         const updatedAt = new Date();
 
         return {
-          id: currentThreadId,
+          id: langgraphThreadId, // Use the LangGraph thread ID, not the original currentThreadId
           updatedAt,
           status: "idle" as const, // Default to idle since we can't determine status from getState
           title,
           description,
           assistantId: config.assistantId,
         } as ThreadItem;
-      } catch (error) {
-        // Thread might not exist or be accessible, return null
-        // This is expected for newly created threads that haven't been indexed yet
-        return null;
+      } catch (error: any) {
+        // Thread might not exist or be accessible
+        // Check if it's a 404 error - this is expected for threads that don't exist in LangGraph
+        const is404 = error?.message?.includes("404") || 
+                     error?.status === 404 || 
+                     error?.response?.status === 404 ||
+                     (error?.message && error.message.includes("not found"));
+        
+        if (is404) {
+          // Thread doesn't exist in LangGraph - this is expected for thread service-only threads
+          // Silently return null - don't log as an error
+          return null;
+        } else {
+          // Other errors - log for debugging
+          console.warn(`[LangGraph] Error fetching thread ${langgraphThreadId}:`, error);
+          return null;
+        }
       }
     },
     {
@@ -551,14 +611,20 @@ export function ThreadList({
   // Expose thread list revalidation to parent component
   // Use refs to create a stable callback that always calls the latest mutate function
   const onMutateReadyRef = useRef(onMutateReady);
+  const onInterruptCountChangeRef = useRef(onInterruptCountChange);
   const threadsRef = useRef(threads);
   // Preserve thread list size when threadId changes (e.g., when clicking "New Thread")
   // This prevents the list from resetting to size 1 when navigating away from a thread
   const preservedSizeRef = useRef<number | null>(null);
 
+  // Update refs when callbacks change - use separate effects to ensure stable dependency arrays
   useEffect(() => {
     onMutateReadyRef.current = onMutateReady;
   }, [onMutateReady]);
+
+  useEffect(() => {
+    onInterruptCountChangeRef.current = onInterruptCountChange;
+  }, [onInterruptCountChange]);
 
   useEffect(() => {
     threadsRef.current = threads;
@@ -633,9 +699,19 @@ export function ThreadList({
   }, [currentThreadId, threads.size, threads.setSize]);
 
   // Notify parent of interrupt count changes
+  // Use ref to avoid dependency on callback, preventing infinite loops
+  // Track previous value to only notify when count actually changes
+  const prevInterruptCountRef = useRef<number | null>(null);
   useEffect(() => {
-    onInterruptCountChange?.(interruptedCount);
-  }, [interruptedCount, onInterruptCountChange]);
+    // Only call callback if the count actually changed (skip initial render if value is 0)
+    const prevCount = prevInterruptCountRef.current;
+    if (prevCount !== interruptedCount) {
+      prevInterruptCountRef.current = interruptedCount;
+      if (onInterruptCountChangeRef.current) {
+        onInterruptCountChangeRef.current(interruptedCount);
+      }
+    }
+  }, [interruptedCount]);
 
   // Collect all rendered thread IDs for keyboard navigation
   const renderedThreadIds = useMemo(() => {

@@ -32,13 +32,49 @@ export const ToolCallBox = React.memo<ToolCallBoxProps>(
     const { name, args, result, status } = useMemo(() => {
       const toolName = toolCall.name || "Unknown Tool";
       const toolArgs = toolCall.args || "{}";
-      let parsedArgs = {};
+      let parsedArgs: Record<string, unknown> = {};
+      
       try {
-        parsedArgs =
-          typeof toolArgs === "string" ? JSON.parse(toolArgs) : toolArgs;
-      } catch {
-        parsedArgs = { raw: toolArgs };
+        if (typeof toolArgs === "string") {
+          // Try to parse as JSON, but handle invalid escape sequences gracefully
+          try {
+            parsedArgs = JSON.parse(toolArgs);
+          } catch (parseError) {
+            // If JSON parsing fails, try to fix common escape sequence issues
+            // or fall back to treating it as a raw string
+            if (parseError instanceof SyntaxError) {
+              // Check if it's an escape sequence error
+              const errorMessage = parseError.message.toLowerCase();
+              if (errorMessage.includes("escaped") || errorMessage.includes("escape")) {
+                // Try to sanitize the string by removing problematic escape sequences
+                // This is a fallback - ideally the data should be properly formatted
+                console.warn("Failed to parse tool args JSON due to invalid escape sequences:", parseError);
+                parsedArgs = { 
+                  _parseError: "Invalid JSON format",
+                  _raw: toolArgs.substring(0, 500) + (toolArgs.length > 500 ? "..." : "")
+                };
+              } else {
+                parsedArgs = { raw: toolArgs };
+              }
+            } else {
+              parsedArgs = { raw: toolArgs };
+            }
+          }
+        } else if (typeof toolArgs === "object" && toolArgs !== null) {
+          // Already an object, use as-is
+          parsedArgs = toolArgs as Record<string, unknown>;
+        } else {
+          parsedArgs = { raw: String(toolArgs) };
+        }
+      } catch (error) {
+        // Final fallback for any unexpected errors
+        console.warn("Error processing tool args:", error);
+        parsedArgs = { 
+          _error: "Failed to process arguments",
+          _raw: String(toolArgs).substring(0, 500)
+        };
       }
+      
       const toolResult = toolCall.result || null;
       const toolStatus = isInterrupted
         ? "interrupted"

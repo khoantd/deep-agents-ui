@@ -25,7 +25,13 @@ export function getAllThreadMetadata(): Record<string, ThreadMetadata> {
 
   try {
     return JSON.parse(stored);
-  } catch {
+  } catch (parseError) {
+    if (parseError instanceof SyntaxError) {
+      console.warn(
+        `Failed to parse thread metadata: ${parseError.message}. Clearing corrupted data.`
+      );
+      localStorage.removeItem(METADATA_KEY);
+    }
     return {};
   }
 }
