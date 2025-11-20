@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, Suspense } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
 import { useQueryState } from "nuqs";
 import { getConfig, saveConfig, StandaloneConfig } from "@/lib/config";
 import { ConfigDialog } from "@/app/components/ConfigDialog";
@@ -16,6 +16,9 @@ import {
 import { ThreadList } from "@/app/components/ThreadList";
 import { ChatProvider } from "@/providers/ChatProvider";
 import { ChatInterface } from "@/app/components/ChatInterface";
+import { CommandPalette } from "@/app/components/CommandPalette";
+import { Breadcrumb } from "@/app/components/Breadcrumb";
+import { useThreads } from "@/app/hooks/useThreads";
 
 function HomePageContent() {
   const [config, setConfig] = useState<StandaloneConfig | null>(null);
@@ -26,7 +29,21 @@ function HomePageContent() {
   const [sidebar, setSidebar] = useQueryState("sidebar");
 
   const [mutateThreads, setMutateThreads] = useState<(() => void) | null>(null);
+  const mutateThreadsRef = useRef<(() => void) | null>(null);
   const [interruptCount, setInterruptCount] = useState(0);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [threadId] = useQueryState("threadId");
+  
+  // Update ref when mutateThreads changes
+  useEffect(() => {
+    mutateThreadsRef.current = mutateThreads;
+  }, [mutateThreads]);
+  
+  // Get current thread for breadcrumb (memoized to prevent unnecessary re-renders)
+  const threads = useThreads({ limit: 100 });
+  const currentThread = useMemo(() => {
+    return threads.data?.flat().find((t) => t.id === threadId);
+  }, [threads.data, threadId]);
 
   // On mount, check for saved config, otherwise show config dialog
   useEffect(() => {
@@ -54,8 +71,55 @@ function HomePageContent() {
     setConfig(newConfig);
   };
 
+  // Memoize callbacks to prevent infinite loops
+  const handleMutateReady = useCallback((fn: () => void) => {
+    mutateThreadsRef.current = fn;
+    setMutateThreads(() => fn);
+  }, []);
+
+  // Use ref to avoid dependency on mutateThreads, preventing infinite loops
+  // Add debounce guard to prevent rapid successive calls
+  const lastRevalidateTime = useRef<number>(0);
+  const handleHistoryRevalidate = useCallback(() => {
+    const now = Date.now();
+    // Debounce: only allow revalidation once per 100ms
+    if (now - lastRevalidateTime.current < 100) {
+      return;
+    }
+    lastRevalidateTime.current = now;
+    mutateThreadsRef.current?.();
+  }, []); // Empty deps - stable callback that always uses latest mutateThreads
+
+  const handleThreadSelect = useCallback(async (id: string) => {
+    await setThreadId(id);
+  }, [setThreadId]);
+
+  const handleCloseSidebar = useCallback(() => {
+    setSidebar(null);
+  }, [setSidebar]);
+
   const langsmithApiKey =
     config?.langsmithApiKey || process.env.NEXT_PUBLIC_LANGSMITH_API_KEY || "";
+
+  // Memoize assistant object to prevent unnecessary re-renders
+  // MUST be called before any early returns to follow Rules of Hooks
+  // Use stable values to prevent object reference changes on every render
+  const assistantTimestamp = useMemo(() => new Date().toISOString(), []);
+  const stableEmptyObject = useMemo(() => ({}), []);
+  const assistant: Assistant = useMemo(
+    () => ({
+      assistant_id: config?.assistantId || "",
+      graph_id: config?.assistantId || "",
+      created_at: assistantTimestamp,
+      updated_at: assistantTimestamp,
+      config: stableEmptyObject,
+      metadata: stableEmptyObject,
+      version: 1,
+      name: "Default Assistant",
+      context: stableEmptyObject,
+    }),
+    [config?.assistantId, assistantTimestamp, stableEmptyObject]
+  );
 
   if (!config) {
     return (
@@ -83,18 +147,6 @@ function HomePageContent() {
     );
   }
 
-  const assistant: Assistant = {
-    assistant_id: config.assistantId,
-    graph_id: config.assistantId,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    config: {},
-    metadata: {},
-    version: 1,
-    name: "Default Assistant",
-    context: {},
-  };
-
   return (
     <>
       <ConfigDialog
@@ -103,20 +155,28 @@ function HomePageContent() {
         onSave={handleSaveConfig}
         initialConfig={config}
       />
+      <CommandPalette
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
+        onThreadSelect={handleThreadSelect}
+      />
       <ClientProvider
         deploymentUrl={config.deploymentUrl}
         apiKey={langsmithApiKey}
       >
         <div className="flex h-screen flex-col">
           <header className="flex h-16 items-center justify-between border-b border-border px-6">
-            <div className="flex items-center gap-4">
-              <h1 className="text-xl font-semibold">Deep Agent UI</h1>
+            <div className="flex items-center gap-4 min-w-0 flex-1">
+              <h1 className="text-xl font-semibold flex-shrink-0">Agents UI</h1>
+              {threadId && currentThread && (
+                <Breadcrumb thread={currentThread} className="flex-shrink-0" />
+              )}
               {!sidebar && (
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={() => setSidebar("1")}
-                  className="rounded-md border border-border bg-card p-3 text-foreground hover:bg-accent"
+                  className="rounded-md border border-border bg-card p-3 text-foreground hover:bg-accent flex-shrink-0"
                 >
                   <MessagesSquare className="mr-2 h-4 w-4" />
                   Threads
@@ -170,11 +230,9 @@ function HomePageContent() {
                     className="relative min-w-[380px]"
                   >
                     <ThreadList
-                      onThreadSelect={async (id) => {
-                        await setThreadId(id);
-                      }}
-                      onMutateReady={(fn) => setMutateThreads(() => fn)}
-                      onClose={() => setSidebar(null)}
+                      onThreadSelect={handleThreadSelect}
+                      onMutateReady={handleMutateReady}
+                      onClose={handleCloseSidebar}
                       onInterruptCountChange={setInterruptCount}
                     />
                   </ResizablePanel>
@@ -189,7 +247,7 @@ function HomePageContent() {
               >
                 <ChatProvider
                   activeAssistant={assistant}
-                  onHistoryRevalidate={() => mutateThreads?.()}
+                  onHistoryRevalidate={handleHistoryRevalidate}
                 >
                   <ChatInterface
                     assistant={assistant}

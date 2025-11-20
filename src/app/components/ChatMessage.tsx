@@ -13,6 +13,7 @@ import {
   getInterruptTitle,
 } from "@/app/utils/utils";
 import { cn } from "@/lib/utils";
+import { highlightText } from "@/app/utils/searchUtils";
 
 interface ChatMessageProps {
   message: Message;
@@ -25,6 +26,9 @@ interface ChatMessageProps {
   interrupt?: Interrupt;
   ui?: any[];
   stream?: any;
+  searchQuery?: string;
+  replyingToSnippet?: string;
+  onJumpToParent?: () => void;
 }
 
 export const ChatMessage = React.memo<ChatMessageProps>(
@@ -39,6 +43,9 @@ export const ChatMessage = React.memo<ChatMessageProps>(
     interrupt,
     ui,
     stream,
+    searchQuery = "",
+    replyingToSnippet,
+    onJumpToParent,
   }) => {
     const isUser = message.type === "human";
     const isAIMessage = message.type === "ai";
@@ -111,12 +118,39 @@ export const ChatMessage = React.memo<ChatMessageProps>(
                     : undefined
                 }
               >
+                {replyingToSnippet && (
+                  <button
+                    type="button"
+                    className="mb-2 inline-flex w-full items-center gap-1 rounded bg-muted/40 px-2 py-1 text-xs text-muted-foreground transition-colors duration-150 hover:bg-muted/70"
+                    onClick={onJumpToParent}
+                    aria-label="Jump to parent message"
+                  >
+                    <span className="font-medium">Replying to</span>
+                    <span className="truncate text-left">{replyingToSnippet}</span>
+                  </button>
+                )}
                 {isUser ? (
                   <p className="m-0 whitespace-pre-wrap break-words text-sm leading-relaxed">
-                    {messageContent}
+                    {searchQuery
+                      ? highlightText(
+                          messageContent,
+                          searchQuery,
+                          "bg-yellow-200 dark:bg-yellow-900"
+                        )
+                      : messageContent}
                   </p>
                 ) : hasContent ? (
-                  <MarkdownContent content={messageContent} />
+                  searchQuery ? (
+                    <div className="prose prose-sm dark:prose-invert max-w-none">
+                      {highlightText(
+                        messageContent,
+                        searchQuery,
+                        "bg-yellow-200 dark:bg-yellow-900"
+                      )}
+                    </div>
+                  ) : (
+                    <MarkdownContent content={messageContent} />
+                  )
                 ) : debugMode ? (
                   <p className="m-0 whitespace-nowrap text-xs italic">
                     Empty Message

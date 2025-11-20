@@ -1,0 +1,324 @@
+# Deep Agents UI - Cursor Rules
+
+## Project Overview
+
+This is a Next.js-based UI application for interacting with Deep Agents (LangGraph agents). It provides a chat interface, thread management, file viewing, and visualization of agent tool calls and sub-agents.
+
+## Tech Stack
+
+- **Framework**: Next.js 15.4.6 (App Router)
+- **React**: 19.1.0
+- **TypeScript**: 5.9.3 (strict mode)
+- **Styling**: Tailwind CSS 3.4.4 with shadcn/ui components
+- **State Management**: React Context API, URL state (nuqs)
+- **Data Fetching**: SWR 2.3.6
+- **UI Libraries**: 
+  - Radix UI primitives
+  - Lucide React icons
+  - Sonner for toasts
+  - react-resizable-panels
+- **Agent Integration**: @langchain/langgraph-sdk
+- **Package Manager**: Yarn 1.22.22
+
+## Project Structure
+
+```
+deep-agents-ui/
+├── src/
+│   ├── app/                    # Next.js App Router
+│   │   ├── components/         # Page-specific components
+│   │   │   ├── ChatInterface.tsx
+│   │   │   ├── ChatMessage.tsx
+│   │   │   ├── ConfigDialog.tsx
+│   │   │   ├── FileViewDialog.tsx
+│   │   │   ├── MarkdownContent.tsx
+│   │   │   ├── SubAgentIndicator.tsx
+│   │   │   ├── TasksFilesSidebar.tsx
+│   │   │   ├── ThreadList.tsx
+│   │   │   └── ToolCallBox.tsx
+│   │   ├── hooks/              # Custom React hooks
+│   │   │   ├── useChat.ts
+│   │   │   └── useThreads.ts
+│   │   ├── types/              # TypeScript type definitions
+│   │   │   ├── inbox.ts
+│   │   │   └── types.ts
+│   │   ├── utils/              # Utility functions
+│   │   │   └── utils.ts
+│   │   ├── layout.tsx          # Root layout
+│   │   ├── page.tsx            # Home page
+│   │   └── globals.css         # Global styles
+│   ├── components/
+│   │   └── ui/                 # shadcn/ui components
+│   │       ├── button.tsx
+│   │       ├── dialog.tsx
+│   │       ├── input.tsx
+│   │       └── ...
+│   ├── lib/                    # Shared utilities
+│   │   ├── config.ts           # Configuration management
+│   │   └── utils.ts            # cn() and other utilities
+│   └── providers/              # React Context providers
+│       ├── ChatProvider.tsx
+│       └── ClientProvider.tsx
+├── public/                     # Static assets
+├── components.json             # shadcn/ui configuration
+├── tsconfig.json               # TypeScript configuration
+├── tailwind.config.mjs         # Tailwind configuration
+├── eslint.config.js            # ESLint configuration
+├── prettier.config.cjs         # Prettier configuration
+└── package.json
+```
+
+## Code Style & Standards
+
+### TypeScript
+
+- **Strict mode enabled** - All TypeScript strict checks are active
+- **Type safety**: Avoid `any` types (ESLint allows it but prefer proper types)
+- **Unused variables**: Prefix with `_` if intentionally unused (e.g., `_threadId`)
+- **Path aliases**: Use `@/*` for imports from `src/` directory
+- **Type definitions**: Place shared types in `src/app/types/`
+
+### React Patterns
+
+- **Client Components**: Use `"use client"` directive at the top of client components
+- **Server Components**: Default to server components when possible (no client-side interactivity needed)
+- **Hooks**: 
+  - Custom hooks in `src/app/hooks/`
+  - Use `useCallback` for memoized functions passed as props
+  - Use `useMemo` for expensive computations
+  - Use `useRef` for DOM references and mutable values
+- **Context**: Use React Context for shared state (ChatProvider, ClientProvider)
+- **Props**: Define component props with TypeScript interfaces
+- **Memoization**: Use `React.memo` for expensive components (e.g., ChatInterface)
+
+### Component Patterns
+
+#### UI Components (shadcn/ui)
+- Located in `src/components/ui/`
+- Use `class-variance-authority` (cva) for variant-based styling
+- Use `cn()` utility from `@/lib/utils` for className merging
+- Follow Radix UI patterns for accessibility
+- Example pattern:
+```typescript
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "@/lib/utils";
+
+const componentVariants = cva(
+  "base-classes",
+  {
+    variants: {
+      variant: { default: "...", secondary: "..." },
+      size: { sm: "...", md: "...", lg: "..." },
+    },
+    defaultVariants: { variant: "default", size: "md" },
+  }
+);
+
+interface ComponentProps extends VariantProps<typeof componentVariants> {
+  className?: string;
+  // ... other props
+}
+
+export function Component({ variant, size, className, ...props }: ComponentProps) {
+  return (
+    <div className={cn(componentVariants({ variant, size }), className)} {...props} />
+  );
+}
+```
+
+#### App Components
+- Located in `src/app/components/`
+- Can be client or server components as needed
+- Use TypeScript interfaces for props
+- Import UI components from `@/components/ui/`
+- Use hooks from `@/app/hooks/` when needed
+
+### Styling
+
+- **Tailwind CSS**: Use utility classes for styling
+- **Class merging**: Always use `cn()` utility for conditional/merged classes
+- **Responsive design**: Use Tailwind responsive prefixes (`sm:`, `md:`, `lg:`, etc.)
+- **Dark mode**: Support dark mode using Tailwind's dark mode classes
+- **Colors**: Use semantic color tokens (e.g., `text-muted-foreground`, `bg-accent`)
+- **Spacing**: Follow consistent spacing scale (Tailwind defaults)
+
+### State Management
+
+- **URL State**: Use `nuqs` (`useQueryState`) for URL-synced state (threadId, assistantId, sidebar)
+- **Local State**: Use `useState` for component-local state
+- **Global State**: Use React Context (ChatProvider, ClientProvider)
+- **Server State**: Use SWR for data fetching and caching
+- **Configuration**: Store in localStorage via `@/lib/config` utilities
+
+### File Naming Conventions
+
+- **Components**: PascalCase (e.g., `ChatInterface.tsx`)
+- **Hooks**: camelCase with `use` prefix (e.g., `useChat.ts`)
+- **Types**: camelCase (e.g., `types.ts`, `inbox.ts`)
+- **Utils**: camelCase (e.g., `utils.ts`, `config.ts`)
+- **UI Components**: camelCase (e.g., `button.tsx`, `dialog.tsx`)
+
+### Import Organization
+
+- Group imports in this order:
+  1. React and Next.js imports
+  2. Third-party libraries
+  3. Internal imports (using `@/` alias)
+  4. Type-only imports (use `import type`)
+- Example:
+```typescript
+import React, { useState, useEffect } from "react";
+import { useQueryState } from "nuqs";
+import { Assistant } from "@langchain/langgraph-sdk";
+import { Button } from "@/components/ui/button";
+import { useChatContext } from "@/providers/ChatProvider";
+import type { ToolCall } from "@/app/types/types";
+```
+
+## LangGraph Integration Patterns
+
+### Assistant Configuration
+- Assistant config stored in localStorage via `StandaloneConfig` interface
+- Required: `deploymentUrl`, `assistantId`
+- Optional: `langsmithApiKey` (can also use `NEXT_PUBLIC_LANGSMITH_API_KEY` env var)
+
+### Chat State Management
+- Use `useStream` hook from `@langchain/langgraph-sdk/react`
+- State type: `StateType` with `messages`, `todos`, `files`, `email`, `ui`
+- Thread management via URL state (`threadId` query param)
+- Optimistic updates for better UX
+
+### Message Handling
+- Messages follow LangGraph SDK `Message` interface
+- Extract content using `extractStringFromMessageContent` utility
+- Handle tool calls, sub-agents, and todos from state
+
+### Tool Calls & Sub-Agents
+- Visualize tool calls with `ToolCallBox` component
+- Show sub-agent indicators with `SubAgentIndicator` component
+- Display todos and files in sidebar (`TasksFilesSidebar`)
+
+## Development Guidelines
+
+### Linting & Formatting
+
+- **ESLint**: Configured with TypeScript ESLint, React hooks, and React refresh plugins
+- **Prettier**: Configured with Tailwind plugin (sorts classes automatically)
+- **Run linting**: `yarn lint` or `yarn lint:fix`
+- **Run formatting**: `yarn format` or `yarn format:check`
+
+### Code Quality Rules
+
+- **No explicit `any`**: ESLint allows it but prefer proper types
+- **Unused vars**: Prefix with `_` (e.g., `_threadId`, `_setThreadId`)
+- **React hooks**: Follow exhaustive-deps rule (can disable with comment if needed)
+- **React refresh**: Only export components from files with components
+
+### Error Handling
+
+- Use try/catch for async operations
+- Display user-friendly error messages
+- Use Sonner toast notifications for user feedback
+- Handle loading states with skeletons or loading indicators
+
+### Performance
+
+- Use `React.memo` for expensive components
+- Use `useCallback` for functions passed as props
+- Use `useMemo` for expensive computations
+- Lazy load heavy components when possible
+- Optimize re-renders with proper dependency arrays
+
+### Accessibility
+
+- Use semantic HTML elements
+- Follow Radix UI accessibility patterns
+- Ensure keyboard navigation works
+- Provide ARIA labels where needed
+- Maintain proper focus management
+
+## Environment Variables
+
+- `NEXT_PUBLIC_LANGSMITH_API_KEY`: LangSmith API key (optional, can also be set in UI)
+
+## Key Dependencies
+
+### Core
+- `next`: 15.4.6
+- `react`: 19.1.0
+- `react-dom`: 19.1.0
+- `typescript`: 5.9.3
+
+### LangGraph
+- `@langchain/langgraph-sdk`: ^0.1.10
+- `@langchain/core`: ^0.3.49
+- `@langchain/langgraph`: ^0.2.50
+
+### UI & Styling
+- `tailwindcss`: ^3.4.4
+- `@radix-ui/*`: Various Radix UI primitives
+- `lucide-react`: ^0.539.0
+- `class-variance-authority`: ^0.7.1
+- `clsx`: ^1.2.1
+- `tailwind-merge`: ^2.6
+
+### Utilities
+- `nuqs`: ^2.4.1 (URL state management)
+- `swr`: ^2.3.6 (data fetching)
+- `sonner`: ^2.0.7 (toasts)
+- `react-markdown`: ^9.0.1
+- `react-syntax-highlighter`: ^15.6.1
+- `uuid`: ^9.0.1
+
+## Common Patterns
+
+### Creating a New Component
+
+1. Determine if it's a UI component (`src/components/ui/`) or app component (`src/app/components/`)
+2. Use TypeScript interface for props
+3. Use `cn()` for className merging
+4. Add proper TypeScript types
+5. Export component
+
+### Adding a New Hook
+
+1. Create file in `src/app/hooks/`
+2. Use `use` prefix in filename
+3. Return typed values/objects
+4. Document with JSDoc if complex
+
+### Adding State to URL
+
+1. Use `useQueryState` from `nuqs`
+2. Provide default value
+3. Use for shareable/bookmarkable state
+
+### Working with LangGraph State
+
+1. Access state via `useChatContext()` hook
+2. State includes: `messages`, `todos`, `files`, `email`, `ui`
+3. Use TypeScript types from `@/app/types/types`
+4. Handle loading and error states
+
+## Important Notes
+
+- **Don't mess up working pieces** - Enhance and fix things carefully
+- **Client vs Server**: Be mindful of "use client" directive - only use when needed
+- **Type Safety**: Prefer TypeScript types over `any`
+- **Performance**: Memoize expensive operations and components
+- **Accessibility**: Follow Radix UI patterns for accessible components
+- **URL State**: Use `nuqs` for state that should be in URL (threads, config)
+- **Configuration**: Settings in UI take precedence over environment variables
+
+## When Adding New Features
+
+1. Follow existing patterns for components, hooks, and state management
+2. Use TypeScript interfaces for all props and data structures
+3. Add proper error handling and loading states
+4. Ensure accessibility (keyboard navigation, ARIA labels)
+5. Test with both light and dark modes
+6. Update types in `src/app/types/` if adding new data structures
+7. Use `cn()` utility for all className merging
+8. Follow import organization conventions
+9. Run linting and formatting before committing
+

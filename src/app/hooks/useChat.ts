@@ -53,7 +53,7 @@ export function useChat({
   });
 
   const sendMessage = useCallback(
-    (content: string) => {
+    (content: string): Message => {
       const newMessage: Message = { id: uuidv4(), type: "human", content };
       stream.submit(
         { messages: [newMessage] },
@@ -66,6 +66,7 @@ export function useChat({
       );
       // Update thread list immediately when sending a message
       onHistoryRevalidate?.();
+      return newMessage;
     },
     [stream, activeAssistant?.config, onHistoryRevalidate]
   );

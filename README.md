@@ -76,9 +76,10 @@ You can optionally set environment variables instead of using the settings dialo
 
 ```env
 NEXT_PUBLIC_LANGSMITH_API_KEY="lsv2_xxxx"
+NEXT_PUBLIC_THREAD_SERVICE_URL="http://127.0.0.1:8080"
 ```
 
-**Note:** Settings configured in the UI take precedence over environment variables.
+**Note:** Settings configured in the UI take precedence over environment variables. The optional `NEXT_PUBLIC_THREAD_SERVICE_URL` is used to sync conversations with the PostgreSQL thread service that ships with this repo.
 
 ### Usage
 

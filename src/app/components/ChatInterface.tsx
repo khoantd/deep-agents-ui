@@ -18,6 +18,11 @@ import {
   Clock,
   Circle,
   FileIcon,
+  Bookmark,
+  BookmarkCheck,
+  FileDown,
+  MessageCircle,
+  X,
 } from "lucide-react";
 import { ChatMessage } from "@/app/components/ChatMessage";
 import type { TodoItem, ToolCall } from "@/app/types/types";
@@ -32,6 +37,27 @@ import { useQueryState } from "nuqs";
 import { cn } from "@/lib/utils";
 import { useStickToBottom } from "use-stick-to-bottom";
 import { FilesPopover } from "@/app/components/TasksFilesSidebar";
+import { MessageSearch } from "@/app/components/MessageSearch";
+import { useMessageInteractions } from "@/app/hooks/useMessageInteractions";
+import { MessageManagementBar } from "@/app/components/MessageManagementBar";
+import {
+  copyMessageWithContext,
+  exportMessage,
+  exportThread,
+  getMessageSnippet,
+  type ExportFormat,
+} from "@/app/utils/messageActions";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { toast } from "sonner";
+import { useThreadPersistence } from "@/app/hooks/useThreadPersistence";
 
 interface ChatInterfaceProps {
   assistant: Assistant | null;
@@ -91,6 +117,45 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
     const [metaOpen, setMetaOpen] = useState<"tasks" | "files" | null>(null);
     const tasksContainerRef = useRef<HTMLDivElement | null>(null);
     const [isWorkflowView, setIsWorkflowView] = useState(false);
+    const [messageSearchQuery, setMessageSearchQuery] = useState("");
+    const [highlightedMessageId, setHighlightedMessageId] = useState<
+      string | null
+    >(null);
+    const highlightedMessageRef = useRef<HTMLDivElement | null>(null);
+    const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+    const [threadViewerParent, setThreadViewerParent] = useState<Message | null>(
+      null
+    );
+    const [bookmarkDialogOpen, setBookmarkDialogOpen] = useState(false);
+    const [threadExportDialogOpen, setThreadExportDialogOpen] = useState(false);
+
+    const {
+      getReactions,
+      toggleReaction,
+      isBookmarked: isMessageBookmarked,
+      toggleBookmark,
+      bookmarkedMessageIds,
+      recordReply,
+      getReplyIds,
+      getReplyCount,
+      getParentId,
+    } = useMessageInteractions(threadId);
+
+    // Auto-scroll to highlighted message
+    useEffect(() => {
+      if (highlightedMessageId && highlightedMessageRef.current) {
+        highlightedMessageRef.current.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      }
+    }, [highlightedMessageId]);
+
+    const handleReplyInThread = useCallback((message: Message) => {
+      setReplyTarget(message);
+      setThreadViewerParent(null);
+      setTimeout(() => textareaRef.current?.focus(), 0);
+    }, []);
 
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const isControlledView = typeof view !== "undefined";
@@ -144,6 +209,90 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
       stopStream,
     } = useChatContext();
 
+    useThreadPersistence({
+      assistantId: assistant?.assistant_id,
+      assistantName: assistant?.name,
+      threadId,
+      messages,
+    });
+
+    const messageMap = useMemo(() => {
+      const map = new Map<string, Message>();
+      messages.forEach((msg) => {
+        if (msg.id) {
+          map.set(msg.id, msg);
+        }
+      });
+      return map;
+    }, [messages]);
+
+    const bookmarkedMessages = useMemo(
+      () =>
+        bookmarkedMessageIds
+          .map((id) => (id ? messageMap.get(id) : undefined))
+          .filter((msg): msg is Message => Boolean(msg)),
+      [bookmarkedMessageIds, messageMap]
+    );
+
+    const resolveMessagesByIds = useCallback(
+      (ids: string[]) =>
+        ids
+          .map((id) => (id ? messageMap.get(id) : undefined))
+          .filter((msg): msg is Message => Boolean(msg)),
+      [messageMap]
+    );
+
+    const threadReplies = useMemo(() => {
+      if (!threadViewerParent?.id) {
+        return [];
+      }
+      return resolveMessagesByIds(getReplyIds(threadViewerParent.id));
+    }, [threadViewerParent, resolveMessagesByIds, getReplyIds]);
+
+    const handleCopyWithContext = useCallback(
+      async (message: Message, parentSnippet?: string) => {
+        try {
+          await copyMessageWithContext(message, threadId, parentSnippet);
+          toast.success("Message copied with context");
+        } catch (error) {
+          console.error("Failed to copy message", error);
+          toast.error("Unable to copy message");
+        }
+      },
+      [threadId]
+    );
+
+    const handleExportMessage = useCallback(
+      (message: Message, replies: Message[], format: ExportFormat) => {
+        try {
+          exportMessage({ message, replies, format, threadId });
+          toast.success(`Exported message as ${format.toUpperCase()}`);
+        } catch (error) {
+          console.error("Failed to export message", error);
+          toast.error("Unable to export message");
+        }
+      },
+      [threadId]
+    );
+
+    const handleThreadExport = useCallback(
+      (format: ExportFormat) => {
+        try {
+          exportThread({
+            messages,
+            format,
+            threadId,
+            title: "Deep Agents Thread Export",
+          });
+          toast.success(`Exported thread as ${format.toUpperCase()}`);
+        } catch (error) {
+          console.error("Failed to export thread", error);
+          toast.error("Unable to export thread");
+        }
+      },
+      [messages, threadId]
+    );
+
     const submitDisabled = isLoading || !assistant;
 
     const handleSubmit = useCallback(
@@ -155,17 +304,22 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
 
         const messageText = input.trim();
         if (!messageText || isLoading) return;
+        let newMessage: Message | null = null;
         if (debugMode) {
-          runSingleStep([
-            {
-              id: uuidv4(),
-              type: "human",
-              content: messageText,
-            },
-          ]);
+          newMessage = {
+            id: uuidv4(),
+            type: "human",
+            content: messageText,
+          };
+          runSingleStep([newMessage]);
         } else {
-          sendMessage(messageText);
+          newMessage = sendMessage(messageText);
         }
+        if (replyTarget?.id && newMessage?.id) {
+          recordReply(replyTarget.id, newMessage.id);
+          toast.success("Reply added to thread");
+        }
+        setReplyTarget(null);
         setInput("");
       },
       [
@@ -176,6 +330,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
         setInput,
         runSingleStep,
         submitDisabled,
+        replyTarget,
+        recordReply,
       ]
     );
 
@@ -412,7 +568,74 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
     };
 
     return (
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <>
+        <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Message Search Bar */}
+        {threadId && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background px-4 py-2">
+            <MessageSearch
+              messages={messages}
+              onMatchFound={setHighlightedMessageId}
+              onSearchQueryChange={setMessageSearchQuery}
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={() => setBookmarkDialogOpen(true)}
+              >
+                {bookmarkedMessages.length > 0 ? (
+                  <BookmarkCheck className="h-4 w-4" />
+                ) : (
+                  <Bookmark className="h-4 w-4" />
+                )}
+                Bookmarks ({bookmarkedMessages.length})
+              </Button>
+              <Dialog
+                open={threadExportDialogOpen}
+                onOpenChange={setThreadExportDialogOpen}
+              >
+                <DialogTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1"
+                  >
+                    <FileDown className="h-4 w-4" />
+                    Export Thread
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-sm">
+                  <DialogHeader>
+                    <DialogTitle>Export current thread</DialogTitle>
+                    <DialogDescription>
+                      Choose a format to download every message in this thread.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid gap-2">
+                    {(["markdown", "json", "pdf"] as ExportFormat[]).map(
+                      (format) => (
+                        <Button
+                          key={format}
+                          variant="outline"
+                          onClick={() => {
+                            handleThreadExport(format);
+                            setThreadExportDialogOpen(false);
+                          }}
+                        >
+                          Export as {format.toUpperCase()}
+                        </Button>
+                      )
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </div>
+          </div>
+        )}
         <div
           className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain"
           ref={scrollRef}
@@ -426,23 +649,88 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
             ) : (
               <>
                 {processedMessages.map((data, index) => {
+                  const messageId = data.message.id;
+                  if (!messageId) {
+                    return null;
+                  }
                   const messageUi = ui?.filter(
                     (u: any) => u.metadata?.message_id === data.message.id
                   );
+                  const isHighlighted =
+                    highlightedMessageId === data.message.id;
+                  const parentId = getParentId(messageId);
+                  const parentMessage = parentId
+                    ? messageMap.get(parentId)
+                    : undefined;
+                  const parentSnippet = parentMessage
+                    ? getMessageSnippet(parentMessage)
+                    : undefined;
+                  const replyIds = getReplyIds(messageId);
+                  const replies = resolveMessagesByIds(replyIds);
+                  const replyCount = getReplyCount(messageId);
+                  const reactions = getReactions(messageId);
+                  const isBookmarked = isMessageBookmarked(messageId);
+                  const latestReply =
+                    replies.length > 0 ? replies[replies.length - 1] : null;
                   return (
-                    <ChatMessage
-                      key={data.message.id}
-                      message={data.message}
-                      toolCalls={data.toolCalls}
-                      onRestartFromAIMessage={handleRestartFromAIMessage}
-                      onRestartFromSubTask={handleRestartFromSubTask}
-                      debugMode={debugMode}
-                      isLoading={isLoading}
-                      isLastMessage={index === processedMessages.length - 1}
-                      interrupt={interrupt}
-                      ui={messageUi}
-                      stream={stream}
-                    />
+                    <div
+                      key={messageId}
+                      ref={isHighlighted ? highlightedMessageRef : null}
+                      className={cn(
+                        "transition-colors duration-200",
+                        isHighlighted && "rounded-lg bg-yellow-100/50 dark:bg-yellow-900/20 p-2 -m-2"
+                      )}
+                    >
+                      <ChatMessage
+                        message={data.message}
+                        toolCalls={data.toolCalls}
+                        onRestartFromAIMessage={handleRestartFromAIMessage}
+                        onRestartFromSubTask={handleRestartFromSubTask}
+                        debugMode={debugMode}
+                        isLoading={isLoading}
+                        isLastMessage={index === processedMessages.length - 1}
+                        interrupt={interrupt}
+                        ui={messageUi}
+                        stream={stream}
+                        searchQuery={messageSearchQuery}
+                        replyingToSnippet={parentSnippet}
+                        onJumpToParent={
+                          parentId
+                            ? () => setHighlightedMessageId(parentId)
+                            : undefined
+                        }
+                      />
+                      <MessageManagementBar
+                        reactions={reactions}
+                        onReactionToggle={(emoji) =>
+                          toggleReaction(messageId, emoji)
+                        }
+                        onReply={() => handleReplyInThread(data.message)}
+                        replyCount={replyCount}
+                        onOpenThread={() => setThreadViewerParent(data.message)}
+                        isBookmarked={isBookmarked}
+                        onToggleBookmark={() => toggleBookmark(messageId)}
+                        onCopy={() =>
+                          handleCopyWithContext(data.message, parentSnippet)
+                        }
+                        onExport={(format) =>
+                          handleExportMessage(data.message, replies, format)
+                        }
+                      />
+                      {latestReply && (
+                        <div className="mt-2 rounded border-l-2 border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-2">
+                            <MessageCircle className="h-3.5 w-3.5" />
+                            <span className="font-medium">
+                              Latest reply preview
+                            </span>
+                          </div>
+                          <p className="mt-1 text-muted-foreground">
+                            {getMessageSnippet(latestReply, 160)}
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
                 {interrupt && debugMode && (
@@ -634,7 +922,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
                         Object.entries(groupedTodos)
                           .filter(([_, todos]) => todos.length > 0)
                           .map(([status, todos]) => (
-                            <div className="mb-4">
+                            <div
+                              key={status}
+                              className="mb-4"
+                            >
                               <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-tertiary">
                                 {
                                   {
@@ -679,6 +970,27 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
               onSubmit={handleSubmit}
               className="flex flex-col"
             >
+              {replyTarget && (
+                <div className="flex items-start justify-between border-b border-border/60 bg-muted/30 px-[18px] py-3 text-sm text-muted-foreground">
+                  <div className="pr-3">
+                    <p className="text-xs font-semibold uppercase text-tertiary">
+                      Replying to {replyTarget.type === "human" ? "User" : "Assistant"}
+                    </p>
+                    <p className="text-sm text-primary">
+                      {getMessageSnippet(replyTarget, 180)}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setReplyTarget(null)}
+                    aria-label="Cancel reply"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -721,6 +1033,144 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
           )}
         </div>
       </div>
+      <Dialog
+        open={Boolean(threadViewerParent)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setThreadViewerParent(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Thread details</DialogTitle>
+            <DialogDescription>
+              View replies linked to this message.
+            </DialogDescription>
+          </DialogHeader>
+          {threadViewerParent && (
+            <div className="space-y-4">
+              <div className="rounded border bg-muted/40 p-4 text-sm">
+                <p className="font-semibold text-primary">
+                  {getMessageSnippet(threadViewerParent, 220)}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      if (threadViewerParent.id) {
+                        setHighlightedMessageId(threadViewerParent.id);
+                      }
+                      setThreadViewerParent(null);
+                    }}
+                  >
+                    Jump to message
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleReplyInThread(threadViewerParent)}
+                  >
+                    Reply in thread
+                  </Button>
+                </div>
+              </div>
+              <ScrollArea className="max-h-[60vh] pr-3">
+                {threadReplies.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No replies yet. Be the first to add one.
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {threadReplies.map((reply) => (
+                      <div
+                        key={reply.id}
+                        className="rounded border bg-background p-3 text-sm"
+                      >
+                        <p className="font-semibold text-primary">
+                          {getMessageSnippet(reply, 200)}
+                        </p>
+                        <div className="mt-2 flex gap-2">
+                          {reply.id && (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => {
+                                setHighlightedMessageId(reply.id!);
+                                setThreadViewerParent(null);
+                              }}
+                            >
+                              Jump
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </ScrollArea>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={bookmarkDialogOpen}
+        onOpenChange={setBookmarkDialogOpen}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Bookmarked messages</DialogTitle>
+            <DialogDescription>
+              Jump back to important highlights in this conversation.
+            </DialogDescription>
+          </DialogHeader>
+          {bookmarkedMessages.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              You haven&apos;t bookmarked any messages yet.
+            </p>
+          ) : (
+            <ScrollArea className="max-h-[60vh] pr-3">
+              <div className="space-y-3">
+                {bookmarkedMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className="rounded border bg-muted/30 p-3 text-sm"
+                  >
+                    <p className="font-semibold text-primary">
+                      {getMessageSnippet(message, 220)}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {message.id && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => {
+                            setHighlightedMessageId(message.id!);
+                            setBookmarkDialogOpen(false);
+                          }}
+                        >
+                          Jump
+                        </Button>
+                      )}
+                      {message.id && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => toggleBookmark(message.id!)}
+                        >
+                          Remove
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          )}
+        </DialogContent>
+      </Dialog>
+      </>
     );
   }
 );
