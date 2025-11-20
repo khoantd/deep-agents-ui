@@ -39,11 +39,11 @@ This document contains a prioritized list of feature suggestions for the Deep Ag
 ### P1 - High-Value UX Features
 
 #### Visual Enhancements
-- **Dark/Light Theme Toggle**: User preference for theme switching
+- ✅ **Dark/Light Theme Toggle**: User preference for theme switching
 - **Customizable Themes**: Allow users to customize color schemes
 - **Message Timestamps**: Show relative timestamps (e.g., "2 minutes ago") with hover for absolute time
 - **Read Receipts**: Visual indicators for message read status
-- **Typing Indicators**: Show when agent is processing/thinking
+- ✅ **Typing Indicators**: Show when agent is processing/thinking
 - **Progress Indicators**: Better visualization of long-running operations
 
 #### Input Improvements

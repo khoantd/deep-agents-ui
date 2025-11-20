@@ -19,6 +19,7 @@ import { ChatInterface } from "@/app/components/ChatInterface";
 import { CommandPalette } from "@/app/components/CommandPalette";
 import { Breadcrumb } from "@/app/components/Breadcrumb";
 import { useThreads } from "@/app/hooks/useThreads";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
 
 function HomePageContent() {
   const [config, setConfig] = useState<StandaloneConfig | null>(null);
@@ -33,12 +34,12 @@ function HomePageContent() {
   const [interruptCount, setInterruptCount] = useState(0);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [threadId] = useQueryState("threadId");
-  
+
   // Update ref when mutateThreads changes
   useEffect(() => {
     mutateThreadsRef.current = mutateThreads;
   }, [mutateThreads]);
-  
+
   // Get current thread for breadcrumb (memoized to prevent unnecessary re-renders)
   const threads = useThreads({ limit: 100 });
   const currentThread = useMemo(() => {
@@ -193,6 +194,7 @@ function HomePageContent() {
                 <span className="font-medium">Assistant:</span>{" "}
                 {config.assistantId}
               </div>
+              <ThemeToggle />
               <Button
                 variant="outline"
                 size="sm"
