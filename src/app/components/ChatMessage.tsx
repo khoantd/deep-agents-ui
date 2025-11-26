@@ -52,6 +52,8 @@ export const ChatMessage = React.memo<ChatMessageProps>(
     const messageContent = extractStringFromMessageContent(message);
     const hasContent = messageContent && messageContent.trim() !== "";
     const hasToolCalls = toolCalls.length > 0;
+    // Don't show "[Empty message]" if message has tool calls (tool calls are the content)
+    const shouldShowEmptyPlaceholder = !hasContent && !hasToolCalls;
     const subAgents = useMemo(() => {
       return toolCalls
         .filter((toolCall: ToolCall) => {
@@ -103,8 +105,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(
             isUser ? "max-w-[70%]" : "w-full"
           )}
         >
-          {(hasContent || debugMode) && (
-            <div className={cn("relative flex items-end gap-0")}>
+          <div className={cn("relative flex items-end gap-0")}>
               <div
                 className={cn(
                   "mt-4 overflow-hidden break-words text-sm font-normal leading-[150%]",
@@ -130,15 +131,21 @@ export const ChatMessage = React.memo<ChatMessageProps>(
                   </button>
                 )}
                 {isUser ? (
-                  <p className="m-0 whitespace-pre-wrap break-words text-sm leading-relaxed">
-                    {searchQuery
-                      ? highlightText(
-                          messageContent,
-                          searchQuery,
-                          "bg-yellow-200 dark:bg-yellow-900"
-                        )
-                      : messageContent}
-                  </p>
+                  hasContent ? (
+                    <p className="m-0 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                      {searchQuery
+                        ? highlightText(
+                            messageContent,
+                            searchQuery,
+                            "bg-yellow-200 dark:bg-yellow-900"
+                          )
+                        : messageContent}
+                    </p>
+                  ) : shouldShowEmptyPlaceholder ? (
+                    <p className="m-0 text-xs italic text-muted-foreground">
+                      [Empty message]
+                    </p>
+                  ) : null
                 ) : hasContent ? (
                   searchQuery ? (
                     <div className="prose prose-sm dark:prose-invert max-w-none">
@@ -151,9 +158,9 @@ export const ChatMessage = React.memo<ChatMessageProps>(
                   ) : (
                     <MarkdownContent content={messageContent} />
                   )
-                ) : debugMode ? (
-                  <p className="m-0 whitespace-nowrap text-xs italic">
-                    Empty Message
+                ) : shouldShowEmptyPlaceholder ? (
+                  <p className="m-0 text-xs italic text-muted-foreground">
+                    [Empty message]
                   </p>
                 ) : null}
               </div>
@@ -166,7 +173,6 @@ export const ChatMessage = React.memo<ChatMessageProps>(
                 </button>
               )}
             </div>
-          )}
           {hasToolCalls && (
             <div className="mt-4 flex w-full flex-col">
               {toolCalls.map((toolCall: ToolCall, idx, arr) => {

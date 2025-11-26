@@ -327,8 +327,8 @@ export function ThreadList({
               }
             } else if (response.status === 404) {
               // Thread doesn't exist in thread service - might be a LangGraph-only thread
-              console.log(`[ThreadService] Thread ${currentThreadId} not found in thread service, trying LangGraph directly`);
-              // Continue to try LangGraph with original ID
+              // This is expected for threads that were never persisted or were created before persistence was enabled
+              // Silently continue to try LangGraph with original ID
             } else {
               console.warn(`[ThreadService] Failed to fetch thread ${currentThreadId} from thread service: ${response.status} ${response.statusText}`);
               // Continue to try LangGraph with original ID

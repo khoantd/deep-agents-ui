@@ -18,6 +18,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { User, LogOut } from "lucide-react";
+import { useThemePreset } from "@/providers/theme-provider";
+import { THEME_PRESETS } from "@/lib/themePresets";
 
 const profileSchema = z.object({
   name: z.string().min(1, "Name is required").optional(),
@@ -39,6 +41,7 @@ export function UserProfile({ open, onOpenChange }: UserProfileProps) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const { preset, setPreset, presets } = useThemePreset();
 
   const {
     register,
@@ -139,6 +142,30 @@ export function UserProfile({ open, onOpenChange }: UserProfileProps) {
               ) : (
                 <p className="text-xs text-yellow-600 dark:text-yellow-400">Email not verified</p>
               )}
+            </div>
+          </div>
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold">Appearance</h3>
+            <div className="space-y-2">
+              <Label htmlFor="themePreset">Theme preset</Label>
+              <select
+                id="themePreset"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                value={preset}
+                onChange={(event) =>
+                  setPreset(event.target.value as (typeof presets)[number]["id"])
+                }
+              >
+                {presets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                {THEME_PRESETS.find((p) => p.id === preset)?.description ??
+                  "Choose how the interface should look."}
+              </p>
             </div>
           </div>
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">

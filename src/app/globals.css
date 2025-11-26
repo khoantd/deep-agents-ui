@@ -136,6 +136,32 @@
     --chart-5: 27 87% 67%;
   }
 
+  /* Theme presets – override a small, focused set of tokens to keep behavior predictable.
+     These layer on top of the default values above. */
+  :root[data-theme-preset="high-contrast"] {
+    --color-background: #ffffff;
+    --color-surface: #f3f4ff;
+    --color-border: #111827;
+    --color-border-light: #9ca3af;
+    --color-text-primary: #000000;
+    --color-text-secondary: #111827;
+    --color-text-tertiary: #4b5563;
+    --primary: 174 100% 28%;
+    --primary-foreground: 0 0% 100%;
+  }
+
+  :root[data-theme-preset="solarized"] {
+    --color-background: #fdf6e3;
+    --color-surface: #f5e8c7;
+    --color-border: #e2c98f;
+    --color-border-light: #f2ddb0;
+    --color-text-primary: #073642;
+    --color-text-secondary: #586e75;
+    --color-text-tertiary: #93a1a1;
+    --primary: 192 87% 35%;
+    --primary-foreground: 0 0% 100%;
+  }
+
   @media (prefers-color-scheme: dark) {
     :root {
       /* App-specific color variables */
@@ -185,6 +211,30 @@
       --chart-3: 30 80% 55%;
       --chart-4: 280 65% 60%;
       --chart-5: 340 75% 55%;
+    }
+
+    :root[data-theme-preset="high-contrast"] {
+      --color-background: #020617;
+      --color-surface: #020617;
+      --color-border: #f9fafb;
+      --color-border-light: #e5e7eb;
+      --color-text-primary: #f9fafb;
+      --color-text-secondary: #e5e7eb;
+      --color-text-tertiary: #9ca3af;
+      --primary: 174 100% 45%;
+      --primary-foreground: 0 0% 0%;
+    }
+
+    :root[data-theme-preset="solarized"] {
+      --color-background: #002b36;
+      --color-surface: #073642;
+      --color-border: #586e75;
+      --color-border-light: #334155;
+      --color-text-primary: #fdf6e3;
+      --color-text-secondary: #eee8d5;
+      --color-text-tertiary: #93a1a1;
+      --primary: 192 87% 60%;
+      --primary-foreground: 0 0% 0%;
     }
   }
 }

@@ -58,6 +58,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
 import { useThreadPersistence } from "@/app/hooks/useThreadPersistence";
+import { safeJsonParse } from "@/lib/jsonUtils";
 
 interface ChatInterfaceProps {
   assistant: Assistant | null;
@@ -207,6 +208,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
       runSingleStep,
       continueStream,
       stopStream,
+      serviceOnlyThreadId,
     } = useChatContext();
 
     useThreadPersistence({
@@ -214,7 +216,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
       assistantName: assistant?.name,
       threadId,
       messages,
+      files,
     });
+
+    const isServiceOnly = Boolean(serviceOnlyThreadId);
 
     const messageMap = useMemo(() => {
       const map = new Map<string, Message>();
@@ -293,7 +298,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
       [messages, threadId]
     );
 
-    const submitDisabled = isLoading || !assistant;
+    const submitDisabled = isLoading || !assistant || isServiceOnly;
 
     const handleSubmit = useCallback(
       (e?: FormEvent) => {
@@ -452,19 +457,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
                 
                 // If args is a string, try to parse it as JSON
                 if (typeof rawArgs === "string") {
-                  try {
-                    args = JSON.parse(rawArgs);
-                  } catch (parseError) {
-                    // If parsing fails, log a warning and use the raw string
-                    if (parseError instanceof SyntaxError) {
-                      console.warn(
-                        `Failed to parse tool call arguments for ${name}:`,
-                        parseError.message
-                      );
-                      args = { _raw: rawArgs.substring(0, 1000) };
-                    } else {
-                      args = { _raw: String(rawArgs).substring(0, 1000) };
-                    }
+                  // Use safeJsonParse to handle invalid escape sequences
+                  const parsed = safeJsonParse<Record<string, unknown>>(rawArgs, null);
+                  if (parsed !== null) {
+                    args = parsed;
+                  } else {
+                    // If parsing failed, use the raw string (truncated)
+                    args = { _raw: rawArgs.substring(0, 1000) };
                   }
                 } else if (typeof rawArgs === "object" && rawArgs !== null) {
                   // Already an object, use as-is
@@ -611,6 +610,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
               onSearchQueryChange={setMessageSearchQuery}
             />
             <div className="flex items-center gap-2">
+              {isServiceOnly && (
+                <div className="rounded border border-dashed border-amber-500 bg-amber-50 px-3 py-1 text-xs text-amber-900">
+                  This is a read-only thread from history. You can view messages
+                  but not continue this conversation.
+                </div>
+              )}
               <Button
                 type="button"
                 variant="outline"

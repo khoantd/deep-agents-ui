@@ -40,11 +40,17 @@ export function useChat({
   const client = useClient();
   const { accessToken } = useAuth();
   const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(null);
+  const [serviceOnlyThreadId, setServiceOnlyThreadId] = useState<string | null>(
+    null
+  );
+  const [serviceOnlyMessages, setServiceOnlyMessages] = useState<Message[]>([]);
+  const [isLoadingServiceMessages, setIsLoadingServiceMessages] = useState(false);
   
   // Resolve threadId to LangGraph thread ID if it's a thread service UUID
   useEffect(() => {
     if (!threadId) {
       setResolvedThreadId(null);
+      setServiceOnlyThreadId(null);
       return;
     }
 
@@ -53,6 +59,7 @@ export function useChat({
     if (!uuidPattern.test(threadId)) {
       // Not a UUID, assume it's already a LangGraph thread ID
       setResolvedThreadId(threadId);
+      setServiceOnlyThreadId(null);
       return;
     }
 
@@ -61,6 +68,7 @@ export function useChat({
     if (!threadServiceUrl || !accessToken) {
       // Can't resolve, use as-is (will fail but that's expected)
       setResolvedThreadId(threadId);
+      setServiceOnlyThreadId(null);
       return;
     }
 
@@ -76,33 +84,54 @@ export function useChat({
           return response.json();
         } else if (response.status === 404) {
           // Thread doesn't exist in thread service - might be a LangGraph-only thread
-          console.log(`[useChat] Thread ${threadId} not found in thread service, using as LangGraph ID`);
+          // This is expected for threads that were never persisted or were created before persistence was enabled
+          // Silently use the ID as a LangGraph thread ID
           setResolvedThreadId(threadId);
+          setServiceOnlyThreadId(null);
           return null;
         } else {
           console.warn(`[useChat] Failed to fetch thread ${threadId} from thread service: ${response.status}`);
           setResolvedThreadId(threadId);
+          setServiceOnlyThreadId(null);
           return null;
         }
       })
-      .then((threadData) => {
+      .then(async (threadData) => {
         if (threadData) {
           const langgraphId = threadData.metadata?.langgraph_thread_id;
+          
+          // Load files from thread metadata if available
+          const filesFromMetadata = threadData.metadata?.files;
+          if (filesFromMetadata && typeof filesFromMetadata === "object" && langgraphId && client) {
+            try {
+              // Restore files to LangGraph state
+              await client.threads.updateState(langgraphId, {
+                values: { files: filesFromMetadata },
+              });
+              console.log(`[useChat] Restored ${Object.keys(filesFromMetadata).length} files from thread metadata`);
+            } catch (error) {
+              console.warn(`[useChat] Failed to restore files to LangGraph state:`, error);
+            }
+          }
+          
           if (langgraphId) {
             console.log(`[useChat] Resolved thread service UUID ${threadId} to LangGraph ID ${langgraphId}`);
             setResolvedThreadId(langgraphId);
+            setServiceOnlyThreadId(null);
           } else {
-            // Thread exists but has no LangGraph ID - can't use it with useStream
-            console.warn(`[useChat] Thread ${threadId} has no langgraph_thread_id, cannot use with LangGraph stream`);
-            setResolvedThreadId(null); // Don't pass threadId to useStream
-            // Clear the threadId from URL since it's not usable
-            setThreadId(null);
+            // Thread exists in thread service but has no LangGraph ID
+            // This is a thread-service-only thread (not a LangGraph thread)
+            // Mark it as read-only immediately - don't try to use UUID as LangGraph ID
+            console.log(`[useChat] Thread ${threadId} is thread-service-only (no langgraph_thread_id). Marking as read-only.`);
+            setResolvedThreadId(null);
+            setServiceOnlyThreadId(threadId);
           }
         }
       })
       .catch((error) => {
         console.warn(`[useChat] Error resolving thread ${threadId}:`, error);
         setResolvedThreadId(threadId); // Fallback to original ID
+        setServiceOnlyThreadId(null);
       });
   }, [threadId, accessToken, setThreadId]);
   
@@ -128,6 +157,130 @@ export function useChat({
     lastThreadIdRef.current = resolvedThreadId ?? null;
   }, [resolvedThreadId]);
 
+  // Fetch messages from thread service for read-only threads
+  useEffect(() => {
+    if (!serviceOnlyThreadId || !accessToken) {
+      setServiceOnlyMessages([]);
+      setIsLoadingServiceMessages(false);
+      return;
+    }
+
+    const threadServiceUrl = process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "");
+    if (!threadServiceUrl) {
+      console.warn("[useChat] Cannot fetch service-only messages: NEXT_PUBLIC_THREAD_SERVICE_URL not configured");
+      return;
+    }
+
+    setIsLoadingServiceMessages(true);
+    
+    fetch(`${threadServiceUrl}/threads/${serviceOnlyThreadId}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to fetch thread: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((threadData: {
+        id: string;
+        messages?: Array<{
+          id: string;
+          content: string;
+          kind: string;
+          participant_id?: string;
+          metadata?: {
+            source_message_type?: string;
+            tool_call_id?: string;
+            assistant_id?: string;
+          };
+          created_at: string;
+        }>;
+        participants?: Array<{
+          id: string;
+          role: string;
+        }>;
+      }) => {
+        if (!threadData.messages || threadData.messages.length === 0) {
+          setServiceOnlyMessages([]);
+          setIsLoadingServiceMessages(false);
+          return;
+        }
+
+        // Sort messages by created_at to ensure correct order
+        const sortedMessages = [...threadData.messages].sort((a, b) => {
+          const timeA = new Date(a.created_at).getTime();
+          const timeB = new Date(b.created_at).getTime();
+          return timeA - timeB;
+        });
+
+        // Convert thread service messages to LangGraph Message format
+        const convertedMessages: Message[] = sortedMessages.map((msg) => {
+          // Determine message type from metadata (most reliable) or participant role
+          let messageType: "human" | "ai" | "tool" = "ai";
+          
+          if (msg.metadata?.source_message_type) {
+            // Use stored source type if available (most reliable)
+            const sourceType = msg.metadata.source_message_type;
+            if (sourceType === "human" || sourceType === "ai" || sourceType === "tool") {
+              messageType = sourceType;
+            }
+          } else {
+            // Fallback: determine from participant role
+            const participant = threadData.participants?.find(p => p.id === msg.participant_id);
+            if (participant) {
+              if (participant.role === "user") {
+                messageType = "human";
+              } else if (participant.role === "tool") {
+                messageType = "tool";
+              } else if (participant.role === "agent") {
+                messageType = "ai";
+              }
+            } else if (msg.kind === "tool_call") {
+              // If kind is tool_call, it's a tool message
+              messageType = "tool";
+            }
+          }
+
+          // For tool messages, we need tool_call_id
+          const toolCallId = msg.metadata?.tool_call_id;
+
+          const langGraphMessage: Message = {
+            id: msg.id,
+            type: messageType,
+            content: msg.content,
+          };
+
+          // Add tool_call_id for tool messages
+          if (messageType === "tool" && toolCallId) {
+            langGraphMessage.tool_call_id = toolCallId;
+          }
+
+          // Preserve metadata if available
+          if (msg.metadata) {
+            langGraphMessage.additional_kwargs = {
+              ...(langGraphMessage.additional_kwargs || {}),
+              ...msg.metadata,
+            };
+          }
+
+          return langGraphMessage;
+        });
+
+        setServiceOnlyMessages(convertedMessages);
+        setIsLoadingServiceMessages(false);
+        console.log(`[useChat] Loaded ${convertedMessages.length} messages from thread service for read-only thread ${serviceOnlyThreadId}`);
+      })
+      .catch((error) => {
+        console.error(`[useChat] Failed to fetch messages for service-only thread ${serviceOnlyThreadId}:`, error);
+        setServiceOnlyMessages([]);
+        setIsLoadingServiceMessages(false);
+      });
+  }, [serviceOnlyThreadId, accessToken]);
+
   // Enhanced error handler for streaming errors
   const handleStreamError = useCallback(
     (error: Error) => {
@@ -138,10 +291,29 @@ export function useChat({
                    (error?.message && error.message.includes("not found"));
       
       if (is404) {
-        // Thread doesn't exist in LangGraph - this is expected for thread service-only threads
-        // Silently handle - don't log as an error
-        console.log(`[Stream Error] Thread ${resolvedThreadId} not found in LangGraph (expected for thread service-only threads)`);
-        // Clear the threadId from URL since it's not usable
+        // Thread doesn't exist in LangGraph
+        // Check if this is a thread-service-only thread (already marked as read-only)
+        if (serviceOnlyThreadId) {
+          // This is expected - thread-service-only threads don't exist in LangGraph
+          // Suppress the error since we've already marked it as read-only
+          console.log(`[Stream Error] Thread ${resolvedThreadId} not found in LangGraph (expected for thread-service-only thread ${serviceOnlyThreadId})`);
+          return;
+        }
+        
+        // Check if resolvedThreadId is a UUID (thread service format)
+        // If so, this might be a thread-service-only thread - mark as read-only
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (resolvedThreadId && uuidPattern.test(resolvedThreadId) && threadId === resolvedThreadId) {
+          // This is a UUID that we tried to use as a LangGraph ID but it doesn't exist in LangGraph
+          // Mark it as read-only so user can still view the thread
+          console.log(`[Stream Error] Thread ${resolvedThreadId} not found in LangGraph, marking as read-only`);
+          setServiceOnlyThreadId(resolvedThreadId);
+          setResolvedThreadId(null);
+          return;
+        }
+        
+        // Otherwise, clear the threadId from URL since it's not usable
+        console.log(`[Stream Error] Thread ${resolvedThreadId} not found in LangGraph`);
         if (threadId) {
           setThreadId(null);
         }
@@ -167,7 +339,7 @@ export function useChat({
       
       onHistoryRevalidate?.();
     },
-    [onHistoryRevalidate, resolvedThreadId, threadId, setThreadId, activeAssistant?.assistant_id]
+    [onHistoryRevalidate, resolvedThreadId, threadId, setThreadId, activeAssistant?.assistant_id, serviceOnlyThreadId, setServiceOnlyThreadId]
   );
 
   const stream = useStream<StateType>({
@@ -277,6 +449,12 @@ export function useChat({
     stream.stop();
   }, [stream]);
 
+  // Use service-only messages when thread is read-only, otherwise use stream messages
+  const messages = serviceOnlyThreadId ? serviceOnlyMessages : stream.messages;
+  const isThreadLoading = serviceOnlyThreadId 
+    ? isLoadingServiceMessages 
+    : stream.isThreadLoading;
+
   return {
     stream,
     todos: stream.values.todos ?? [],
@@ -284,9 +462,9 @@ export function useChat({
     email: stream.values.email,
     ui: stream.values.ui,
     setFiles,
-    messages: stream.messages,
+    messages,
     isLoading: stream.isLoading,
-    isThreadLoading: stream.isThreadLoading,
+    isThreadLoading,
     interrupt: stream.interrupt,
     getMessagesMetadata: stream.getMessagesMetadata,
     sendMessage,
@@ -295,5 +473,6 @@ export function useChat({
     stopStream,
     sendHumanResponse,
     markCurrentThreadAsResolved,
+    serviceOnlyThreadId,
   };
 }

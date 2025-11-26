@@ -93,16 +93,13 @@ export function useThreads(props: {
       }
 
       if (useThreadService) {
-        // When authenticated, fetch from both thread service and LangGraph, then merge
+        // When authenticated, fetch ONLY from thread service (database is source of truth)
         return {
-          kind: "merged" as const,
+          kind: "threadservice" as const,
           pageIndex,
           pageSize,
           baseUrl: THREAD_SERVICE_BASE_URL!,
           accessToken: accessToken!,
-          deploymentUrl: config.deploymentUrl,
-          assistantId: config.assistantId,
-          apiKey: apiKey || "",
           status: props?.status,
           threadServiceStatus: mapLangGraphStatusToThreadServiceStatus(props?.status),
         };
@@ -124,9 +121,9 @@ export function useThreads(props: {
       };
     },
     async (key: any) => {
-      if (key.kind === "merged") {
-        // Fetch from both thread service and LangGraph, then merge
-        const { baseUrl, accessToken, pageIndex, pageSize, deploymentUrl, assistantId, apiKey, status, threadServiceStatus } = key;
+      if (key.kind === "threadservice") {
+        // Fetch ONLY from thread service (database is source of truth)
+        const { baseUrl, accessToken, pageIndex, pageSize, threadServiceStatus } = key;
         
         // Fetch from thread service
         const threadServiceParams = new URLSearchParams({
@@ -137,7 +134,6 @@ export function useThreads(props: {
           threadServiceParams.append("status", threadServiceStatus);
         }
 
-        let threadServiceThreads: ThreadItem[] = [];
         try {
           const threadServiceResponse = await fetch(`${baseUrl}/threads?${threadServiceParams}`, {
             headers: {
@@ -150,37 +146,41 @@ export function useThreads(props: {
             const threadServiceData = await safeResponseJson<{ threads?: any[]; total?: number }>(threadServiceResponse, { threads: [] });
             if (!threadServiceData) {
               console.warn("[ThreadService] Failed to parse thread service response");
-              threadServiceThreads = [];
-            } else {
-              const threadsArray = threadServiceData.threads || [];
-              console.log(`[ThreadService] Fetched ${threadsArray.length} threads (total: ${threadServiceData.total ?? 'unknown'})`);
-              threadServiceThreads = threadsArray.map((thread: any): ThreadItem => {
-                const assistantIdFromMeta = thread.metadata?.assistant_id || assistantId;
-                const langgraphThreadId = thread.metadata?.langgraph_thread_id;
-                const threadId = langgraphThreadId || thread.id;
-
-                return {
-                  id: threadId,
-                  updatedAt: new Date(thread.updated_at),
-                  status: mapThreadServiceStatusToLangGraphStatus(thread.status),
-                  title: thread.title || "Untitled Thread",
-                  description: thread.summary || "",
-                  assistantId: assistantIdFromMeta,
-                };
-              });
+              return [];
             }
+            
+            const threadsArray = threadServiceData.threads || [];
+            console.log(`[ThreadService] Fetched ${threadsArray.length} threads from database (total: ${threadServiceData.total ?? 'unknown'})`);
+            return threadsArray.map((thread: any): ThreadItem => {
+              const assistantIdFromMeta = thread.metadata?.assistant_id || config?.assistantId;
+              
+              // Use thread service UUID as the ID (this is the database primary key)
+              // The langgraph_thread_id is stored in metadata for reference
+              return {
+                id: thread.id, // Thread service UUID - this is the source of truth
+                updatedAt: new Date(thread.updated_at),
+                status: mapThreadServiceStatusToLangGraphStatus(thread.status),
+                title: thread.title || "Untitled Thread",
+                description: thread.summary || "",
+                assistantId: assistantIdFromMeta,
+              };
+            });
           } else {
             const errorText = await threadServiceResponse.text().catch(() => "Unknown error");
             console.error(
               `[ThreadService] Failed to fetch threads: ${threadServiceResponse.status} ${threadServiceResponse.statusText}`,
               errorText
             );
+            // Return empty array on error - don't fall back to LangGraph
+            return [];
           }
         } catch (error) {
           console.error("[ThreadService] Failed to fetch threads from thread service", error);
+          // Return empty array on error - don't fall back to LangGraph
+          return [];
         }
-
-        // Fetch from LangGraph
+      } else if (key.kind === "langgraph") {
+        // Fetch from LangGraph (fallback)
         let langGraphThreads: ThreadItem[] = [];
         try {
           const client = new Client({

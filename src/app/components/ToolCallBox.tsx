@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { ToolCall } from "@/app/types/types";
 import { cn } from "@/lib/utils";
 import { LoadExternalComponent } from "@langchain/langgraph-sdk/react-ui";
+import { safeJsonParse } from "@/lib/jsonUtils";
 
 interface ToolCallBoxProps {
   toolCall: ToolCall;
@@ -36,29 +37,16 @@ export const ToolCallBox = React.memo<ToolCallBoxProps>(
       
       try {
         if (typeof toolArgs === "string") {
-          // Try to parse as JSON, but handle invalid escape sequences gracefully
-          try {
-            parsedArgs = JSON.parse(toolArgs);
-          } catch (parseError) {
-            // If JSON parsing fails, try to fix common escape sequence issues
-            // or fall back to treating it as a raw string
-            if (parseError instanceof SyntaxError) {
-              // Check if it's an escape sequence error
-              const errorMessage = parseError.message.toLowerCase();
-              if (errorMessage.includes("escaped") || errorMessage.includes("escape")) {
-                // Try to sanitize the string by removing problematic escape sequences
-                // This is a fallback - ideally the data should be properly formatted
-                console.warn("Failed to parse tool args JSON due to invalid escape sequences:", parseError);
-                parsedArgs = { 
-                  _parseError: "Invalid JSON format",
-                  _raw: toolArgs.substring(0, 500) + (toolArgs.length > 500 ? "..." : "")
-                };
-              } else {
-                parsedArgs = { raw: toolArgs };
-              }
-            } else {
-              parsedArgs = { raw: toolArgs };
-            }
+          // Use safeJsonParse to handle invalid escape sequences gracefully
+          const parsed = safeJsonParse<Record<string, unknown>>(toolArgs, null);
+          if (parsed !== null) {
+            parsedArgs = parsed;
+          } else {
+            // If parsing failed, use the raw string (truncated)
+            parsedArgs = { 
+              _parseError: "Invalid JSON format",
+              _raw: toolArgs.substring(0, 500) + (toolArgs.length > 500 ? "..." : "")
+            };
           }
         } else if (typeof toolArgs === "object" && toolArgs !== null) {
           // Already an object, use as-is
