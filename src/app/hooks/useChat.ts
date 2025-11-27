@@ -14,6 +14,8 @@ import { useClient } from "@/providers/ClientProvider";
 import { HumanResponse } from "@/app/types/inbox";
 import { useQueryState } from "nuqs";
 import { useAuth } from "@/providers/AuthProvider";
+import { getThreadServiceBaseUrl, isValidUUID } from "@/lib/threadServiceConfig";
+import { toast } from "sonner";
 
 export type StateType = {
   messages: Message[];
@@ -67,8 +69,7 @@ export function useChat({
     }
 
     // Check if threadId is a UUID (thread service format)
-    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidPattern.test(threadId)) {
+    if (!isValidUUID(threadId)) {
       // Not a UUID, assume it's already a LangGraph thread ID
       setResolvedThreadId(threadId);
       setServiceOnlyThreadId(null);
@@ -76,7 +77,7 @@ export function useChat({
     }
 
     // It's a UUID - try to resolve it from thread service
-    const threadServiceUrl = process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "");
+    const threadServiceUrl = getThreadServiceBaseUrl();
     if (!threadServiceUrl || !accessToken) {
       // Can't resolve, use as-is (will fail but that's expected)
       setResolvedThreadId(threadId);
@@ -84,81 +85,107 @@ export function useChat({
       return;
     }
 
+    // Create AbortController to cancel in-flight requests when threadId changes
+    const abortController = new AbortController();
+    let isCurrentRequest = true;
+
     // Fetch from thread service to get langgraph_thread_id
     fetch(`${threadServiceUrl}/threads/${threadId}`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
       },
+      signal: abortController.signal,
     })
       .then((response) => {
+        if (!isCurrentRequest) return null; // Ignore stale responses
+        
         if (response.ok) {
           return response.json();
         } else if (response.status === 404) {
           // Thread doesn't exist in thread service - might be a LangGraph-only thread
           // This is expected for threads that were never persisted or were created before persistence was enabled
           // Silently use the ID as a LangGraph thread ID
-          setResolvedThreadId(threadId);
-          setServiceOnlyThreadId(null);
+          if (isCurrentRequest) {
+            setResolvedThreadId(threadId);
+            setServiceOnlyThreadId(null);
+          }
           return null;
         } else {
-          console.warn(`[useChat] Failed to fetch thread ${threadId} from thread service: ${response.status}`);
-          setResolvedThreadId(threadId);
-          setServiceOnlyThreadId(null);
+          if (isCurrentRequest) {
+            console.warn(`[useChat] Failed to fetch thread ${threadId} from thread service: ${response.status}`);
+            toast.error(`Failed to load thread: ${response.statusText || "Unknown error"}`);
+            setResolvedThreadId(threadId);
+            setServiceOnlyThreadId(null);
+          }
           return null;
         }
       })
       .then(async (threadData) => {
-        if (threadData) {
-          const langgraphId = threadData.metadata?.langgraph_thread_id;
-          const messageCount = threadData.messages?.length ?? 0;
-          
-          console.log(`[useChat] Thread ${threadId} from thread service:`, {
-            threadId: threadData.id,
-            hasLanggraphId: !!langgraphId,
-            langgraphId,
-            messageCount,
-            participantCount: threadData.participants?.length ?? 0,
-          });
-          
-          // Load files from thread metadata if available
-          const filesFromMetadata = threadData.metadata?.files;
-          if (filesFromMetadata && typeof filesFromMetadata === "object" && langgraphId && client) {
-            try {
-              // Restore files to LangGraph state
-              await client.threads.updateState(langgraphId, {
-                values: { files: filesFromMetadata },
-              });
-              console.log(`[useChat] Restored ${Object.keys(filesFromMetadata).length} files from thread metadata`);
-            } catch (error) {
-              console.warn(`[useChat] Failed to restore files to LangGraph state:`, error);
-            }
+        if (!isCurrentRequest || !threadData) return; // Ignore stale responses
+        
+        const langgraphId = threadData.metadata?.langgraph_thread_id;
+        const messageCount = threadData.messages?.length ?? 0;
+        
+        console.log(`[useChat] Thread ${threadId} from thread service:`, {
+          threadId: threadData.id,
+          hasLanggraphId: !!langgraphId,
+          langgraphId,
+          messageCount,
+          participantCount: threadData.participants?.length ?? 0,
+        });
+        
+        // Load files from thread metadata if available
+        const filesFromMetadata = threadData.metadata?.files;
+        if (filesFromMetadata && typeof filesFromMetadata === "object" && langgraphId && client) {
+          try {
+            // Restore files to LangGraph state
+            await client.threads.updateState(langgraphId, {
+              values: { files: filesFromMetadata },
+            });
+            console.log(`[useChat] Restored ${Object.keys(filesFromMetadata).length} files from thread metadata`);
+          } catch (error) {
+            console.warn(`[useChat] Failed to restore files to LangGraph state:`, error);
           }
-          
-          if (langgraphId) {
-            console.log(`[useChat] Resolved thread service UUID ${threadId} to LangGraph ID ${langgraphId} (has ${messageCount} messages in DB)`);
-            setResolvedThreadId(langgraphId);
-            setServiceOnlyThreadId(null);
-            // Store the thread service UUID for potential fallback
-            setFallbackThreadId(threadId);
-          } else {
-            // Thread exists in thread service but has no LangGraph ID
-            // This is a thread-service-only thread (not a LangGraph thread)
-            // Mark it as read-only immediately - don't try to use UUID as LangGraph ID
-            console.log(`[useChat] Thread ${threadId} is thread-service-only (no langgraph_thread_id). Has ${messageCount} messages in DB. Marking as read-only.`);
-            setResolvedThreadId(null);
-            setServiceOnlyThreadId(threadId);
-            setFallbackThreadId(null);
-          }
+        }
+        
+        if (langgraphId) {
+          console.log(`[useChat] Resolved thread service UUID ${threadId} to LangGraph ID ${langgraphId} (has ${messageCount} messages in DB)`);
+          setResolvedThreadId(langgraphId);
+          setServiceOnlyThreadId(null);
+          // Store the thread service UUID for potential fallback
+          setFallbackThreadId(threadId);
+        } else {
+          // Thread exists in thread service but has no LangGraph ID
+          // This is a thread-service-only thread (not a LangGraph thread)
+          // Mark it as read-only immediately - don't try to use UUID as LangGraph ID
+          console.log(`[useChat] Thread ${threadId} is thread-service-only (no langgraph_thread_id). Has ${messageCount} messages in DB. Marking as read-only.`);
+          setResolvedThreadId(null);
+          setServiceOnlyThreadId(threadId);
+          setFallbackThreadId(null);
         }
       })
       .catch((error) => {
-        console.warn(`[useChat] Error resolving thread ${threadId}:`, error);
-        setResolvedThreadId(threadId); // Fallback to original ID
-        setServiceOnlyThreadId(null);
-        setFallbackThreadId(null);
+        // Ignore AbortError (expected when threadId changes)
+        if (error.name === "AbortError") {
+          return;
+        }
+        
+        if (isCurrentRequest) {
+          console.warn(`[useChat] Error resolving thread ${threadId}:`, error);
+          toast.error("Failed to resolve thread. Please try again.");
+          setResolvedThreadId(threadId); // Fallback to original ID
+          setServiceOnlyThreadId(null);
+          setFallbackThreadId(null);
+        }
       });
-  }, [threadId, accessToken, setThreadId]);
+
+    return () => {
+      // Cancel the request when threadId changes or component unmounts
+      isCurrentRequest = false;
+      abortController.abort();
+    };
+  }, [threadId, accessToken, setThreadId, client]);
   
   // Use ref to track the last threadId to prevent infinite updates
   const lastThreadIdRef = useRef<string | null>(resolvedThreadId ?? null);
@@ -190,7 +217,7 @@ export function useChat({
       return;
     }
 
-    const threadServiceUrl = process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "");
+    const threadServiceUrl = getThreadServiceBaseUrl();
     if (!threadServiceUrl) {
       console.warn("[useChat] Cannot fetch service-only messages: NEXT_PUBLIC_THREAD_SERVICE_URL not configured");
       return;
@@ -319,6 +346,7 @@ export function useChat({
       })
       .catch((error) => {
         console.error(`[useChat] Failed to fetch messages for service-only thread ${serviceOnlyThreadId}:`, error);
+        toast.error("Failed to load thread messages. Please try again.");
         setServiceOnlyMessages([]);
         setIsLoadingServiceMessages(false);
       });
@@ -354,8 +382,7 @@ export function useChat({
         
         // Check if resolvedThreadId is a UUID (thread service format)
         // If so, this might be a thread-service-only thread - mark as read-only
-        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        if (resolvedThreadId && uuidPattern.test(resolvedThreadId) && threadId === resolvedThreadId) {
+        if (resolvedThreadId && isValidUUID(resolvedThreadId) && threadId === resolvedThreadId) {
           // This is a UUID that we tried to use as a LangGraph ID but it doesn't exist in LangGraph
           // Mark it as read-only so user can still view the thread
           console.log(`[Stream Error] Thread ${resolvedThreadId} not found in LangGraph, marking as read-only`);
@@ -412,7 +439,7 @@ export function useChat({
   const loadMessagesFromThreadService = useCallback(async (threadServiceId: string) => {
     if (!accessToken) return;
     
-    const threadServiceUrl = process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "");
+    const threadServiceUrl = getThreadServiceBaseUrl();
     if (!threadServiceUrl) {
       console.warn("[useChat] Cannot load fallback messages: NEXT_PUBLIC_THREAD_SERVICE_URL not configured");
       return;
@@ -543,6 +570,7 @@ export function useChat({
       console.log(`[useChat] Loaded ${convertedMessages.length} fallback messages from thread service for thread ${threadServiceId}`);
     } catch (error) {
       console.error(`[useChat] Failed to load fallback messages for thread ${threadServiceId}:`, error);
+      toast.error("Failed to load thread messages. Please try again.");
       setFallbackMessages([]);
       fallbackMessagesRef.current = [];
       setIsLoadingFallbackMessages(false);
@@ -574,48 +602,46 @@ export function useChat({
     // Reset attempt tracking if thread changed
     if (fallbackLoadAttemptedRef.current !== resolvedThreadId) {
       fallbackLoadAttemptedRef.current = null;
+      previousStreamMessageCountRef.current = 0;
     }
 
+    // Use refs to avoid dependency on stream.messages (which changes reference frequently)
     const currentMessageCount = stream.messages?.length ?? 0;
     const messageCountChanged = currentMessageCount !== previousStreamMessageCountRef.current;
-    previousStreamMessageCountRef.current = currentMessageCount;
+    const isStillLoading = stream.isThreadLoading;
+    const hasMessages = currentMessageCount > 0;
 
-      // Check if LangGraph stream has messages
-      const checkMessages = () => {
-        const hasMessages = stream.messages && stream.messages.length > 0;
-        const isStillLoading = stream.isThreadLoading;
-        
-        console.log(`[useChat] Checking messages for thread ${resolvedThreadId}:`, {
-          hasMessages,
-          isStillLoading,
-          isLoadingFallback: isLoadingFallbackMessages,
-          fallbackMessageCount: fallbackMessagesRef.current.length,
-          fallbackAttempted: fallbackLoadAttemptedRef.current,
-        });
-        
-        // If stream is not loading and has no messages, try to load from DB
-        // Only attempt once per thread to prevent infinite loops
-        if (!isStillLoading && !hasMessages && !isLoadingFallbackMessages && 
-            fallbackMessagesRef.current.length === 0 && 
-            fallbackLoadAttemptedRef.current !== resolvedThreadId) {
-          console.log(`[useChat] LangGraph thread ${resolvedThreadId} has no messages, loading from thread service ${fallbackThreadId} as fallback`);
-          fallbackLoadAttemptedRef.current = resolvedThreadId;
-          loadMessagesFromThreadService(fallbackThreadId);
-        }
-      };
+    // Update ref only when count actually changes
+    if (messageCountChanged) {
+      previousStreamMessageCountRef.current = currentMessageCount;
+    }
 
-    // Only check if message count changed or loading state changed
-    // This prevents infinite loops from stream.messages being a new array reference
-    if (messageCountChanged || !stream.isThreadLoading) {
-      checkMessages();
+    // Check if we should load fallback messages
+    // Only attempt once per thread to prevent infinite loops
+    const shouldLoadFallback = 
+      !isStillLoading && 
+      !hasMessages && 
+      !isLoadingFallbackMessages && 
+      fallbackMessagesRef.current.length === 0 && 
+      fallbackLoadAttemptedRef.current !== resolvedThreadId;
+
+    if (shouldLoadFallback) {
+      console.log(`[useChat] LangGraph thread ${resolvedThreadId} has no messages, loading from thread service ${fallbackThreadId} as fallback`);
+      fallbackLoadAttemptedRef.current = resolvedThreadId;
+      loadMessagesFromThreadService(fallbackThreadId);
+      return;
     }
 
     // Also check after a delay to catch cases where stream loads later (only if not already attempted)
     const checkTimeout = setTimeout(() => {
-      // Re-check current state inside timeout
-      const hasMessages = stream.messages && stream.messages.length > 0;
-      const isStillLoading = stream.isThreadLoading;
-      if (!isStillLoading && !hasMessages && !isLoadingFallbackMessages && 
+      // Re-check current state inside timeout using refs to avoid stale closures
+      const latestMessageCount = stream.messages?.length ?? 0;
+      const latestIsLoading = stream.isThreadLoading;
+      const latestHasMessages = latestMessageCount > 0;
+      
+      if (!latestIsLoading && 
+          !latestHasMessages && 
+          !isLoadingFallbackMessages && 
           fallbackMessagesRef.current.length === 0 && 
           fallbackLoadAttemptedRef.current !== resolvedThreadId) {
         console.log(`[useChat] LangGraph thread ${resolvedThreadId} has no messages after delay, loading from thread service ${fallbackThreadId} as fallback`);
@@ -625,7 +651,9 @@ export function useChat({
     }, 2000);
 
     return () => clearTimeout(checkTimeout);
-  }, [resolvedThreadId, fallbackThreadId, stream.isThreadLoading, serviceOnlyThreadId, accessToken, isLoadingFallbackMessages, loadMessagesFromThreadService]);
+    // Only depend on resolvedThreadId, fallbackThreadId, and isThreadLoading to prevent infinite loops
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedThreadId, fallbackThreadId, stream.isThreadLoading, serviceOnlyThreadId]);
 
   const sendMessage = useCallback(
     async (content: string): Promise<Message> => {
@@ -655,7 +683,7 @@ export function useChat({
       
       // If this is a thread-service-only thread (no LangGraph thread), create one and link it
       if (serviceOnlyThreadId && !resolvedThreadId) {
-        const threadServiceUrl = process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "");
+        const threadServiceUrl = getThreadServiceBaseUrl();
         
         if (threadServiceUrl && accessToken && client && activeAssistant) {
           try {

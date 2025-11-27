@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { useSession, signIn as nextAuthSignIn, signOut as nextAuthSignOut } from "next-auth/react";
 import { safeResponseJson } from "@/lib/jsonUtils";
+import { getThreadServiceBaseUrlWithFallback } from "@/lib/threadServiceConfig";
 
 interface User {
   id: string;
@@ -24,8 +25,7 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const THREAD_SERVICE_URL =
-  process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "") || "http://localhost:8080";
+const THREAD_SERVICE_URL = getThreadServiceBaseUrlWithFallback();
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const { data: session, status } = useSession();

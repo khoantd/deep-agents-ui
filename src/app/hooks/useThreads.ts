@@ -4,6 +4,7 @@ import { Client } from "@langchain/langgraph-sdk";
 import { getConfig } from "@/lib/config";
 import { useAuth } from "@/providers/AuthProvider";
 import { safeResponseJson } from "@/lib/jsonUtils";
+import { getThreadServiceBaseUrl } from "@/lib/threadServiceConfig";
 
 export interface ThreadItem {
   id: string;
@@ -16,8 +17,7 @@ export interface ThreadItem {
 
 const DEFAULT_PAGE_SIZE = 20;
 
-const THREAD_SERVICE_BASE_URL =
-  process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "") || null;
+const THREAD_SERVICE_BASE_URL = getThreadServiceBaseUrl();
 
 // Map thread service status to LangGraph status
 function mapThreadServiceStatusToLangGraphStatus(

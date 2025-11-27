@@ -36,6 +36,7 @@ import { useClient } from "@/providers/ClientProvider";
 import { getConfig } from "@/lib/config";
 import { useAuth } from "@/providers/AuthProvider";
 import useSWR from "swr";
+import { getThreadServiceBaseUrl, isValidUUID } from "@/lib/threadServiceConfig";
 
 type StatusFilter = "all" | "idle" | "busy" | "interrupted" | "error" | "completed";
 
@@ -299,11 +300,9 @@ export function ThreadList({
       let langgraphThreadId = currentThreadId;
       
       // If currentThreadId looks like a UUID (thread service ID), try to get langgraph_thread_id
-      // UUID format: 8-4-4-4-12 hex digits
-      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (uuidPattern.test(currentThreadId)) {
+      if (isValidUUID(currentThreadId)) {
         // This might be a thread service UUID, try to fetch from thread service to get langgraph_thread_id
-        const threadServiceUrl = process.env.NEXT_PUBLIC_THREAD_SERVICE_URL?.replace(/\/$/, "");
+        const threadServiceUrl = getThreadServiceBaseUrl();
         
         if (threadServiceUrl && accessToken) {
           try {
@@ -645,21 +644,18 @@ export function ThreadList({
     const currentSize = preservedSizeRef.current ?? currentThreads.size;
     
     if (currentThreads.mutate && currentSize > 0) {
-      // For useSWRInfinite, mutate() should preserve existing pages, but we need to
-      // ensure the size is maintained as a safeguard
-      // First, explicitly set the size to ensure it's maintained before mutating
+      // For useSWRInfinite, mutate() should preserve existing pages
+      // Set size before mutating to ensure it's maintained
       if (currentThreads.setSize) {
         currentThreads.setSize(currentSize);
-        // Update preserved size to match
         preservedSizeRef.current = currentSize;
       }
       
-      // Then call mutate to revalidate - this should preserve existing pages
-      // Use mutate with revalidate option to ensure data is refreshed
+      // Call mutate to revalidate - this should preserve existing pages
       currentThreads.mutate();
       
-      // Double-check size is maintained after revalidation
-      // Use multiple checks to ensure size is preserved even if mutate resets it
+      // Single check after a short delay to restore size if it was reset
+      // This is a safeguard in case mutate() resets the size
       const checkAndRestoreSize = () => {
         const latestThreads = threadsRef.current;
         if (latestThreads.setSize && latestThreads.size < currentSize) {
@@ -668,12 +664,9 @@ export function ThreadList({
         }
       };
       
-      // Check immediately and after React updates
-      // Use multiple timeouts to catch any delayed resets
+      // Use requestAnimationFrame for immediate check, then one timeout as backup
       requestAnimationFrame(checkAndRestoreSize);
-      setTimeout(checkAndRestoreSize, 50);
       setTimeout(checkAndRestoreSize, 100);
-      setTimeout(checkAndRestoreSize, 200);
     } else if (currentThreads.mutate) {
       // If size is 0 or undefined, just call mutate normally
       currentThreads.mutate();
