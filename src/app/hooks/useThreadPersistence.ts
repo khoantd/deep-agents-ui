@@ -217,6 +217,8 @@ export function useThreadPersistence({
   const syncInProgressRef = useRef<Promise<void> | null>(null); // Track ongoing sync operation
   const syncedFilesRef = useRef<Record<string, string>>({});
   const fileSyncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Store participant ID mapping: threadId -> role -> participant_id
+  const participantMapRef = useRef<Record<string, Record<string, string>>>({});
 
   useEffect(() => {
     if (!threadId) return;
@@ -226,7 +228,213 @@ export function useThreadPersistence({
     syncingIdsRef.current.clear(); // Clear in-flight tracking when thread changes
     threadIdMapRef.current = loadThreadIdMap();
     syncedFilesRef.current = loadSyncedFiles(threadId);
+    // Note: participant mapping will be loaded when thread is created/fetched
   }, [threadId]);
+
+  // Immediately create thread in database when threadId is set (even before messages arrive)
+  useEffect(() => {
+    // Check prerequisites for immediate thread creation
+    if (!threadId) {
+      return;
+    }
+
+    if (!THREAD_SERVICE_BASE_URL) {
+      return; // Silently skip if service not configured
+    }
+
+    if (!accessToken) {
+      return; // Silently skip if user not authenticated
+    }
+
+    // Check if thread already exists in our mapping
+    if (threadIdMapRef.current[threadId]) {
+      return; // Thread already exists, no need to create
+    }
+
+    // Check if we're already creating this thread
+    if (createdThreadsRef.current.has(threadId)) {
+      return; // Thread creation already in progress or completed
+    }
+
+    let cancelled = false;
+
+    // Check thread service health (cached per session)
+    if (!healthCheckRef.current && THREAD_SERVICE_BASE_URL) {
+      healthCheckRef.current = checkThreadServiceHealth(THREAD_SERVICE_BASE_URL);
+      healthCheckRef.current.then((isHealthy) => {
+        if (!isHealthy) {
+          console.error(
+            `[ThreadService] Thread service is not reachable at ${THREAD_SERVICE_BASE_URL}. ` +
+            "Threads will not be persisted. Please ensure the thread service is running."
+          );
+        }
+      });
+    }
+
+    async function createThreadImmediately(): Promise<void> {
+      // Wait for health check if it's in progress
+      if (healthCheckRef.current) {
+        const isHealthy = await healthCheckRef.current;
+        if (!isHealthy || cancelled) {
+          return; // Service is not available, skip creation
+        }
+      }
+
+      // Double-check we still need to create (might have been created by another effect)
+      if (threadIdMapRef.current[threadId] || cancelled) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${THREAD_SERVICE_BASE_URL}/threads`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            title: "New Thread", // Placeholder title, will be updated when messages arrive
+            summary: undefined,
+            metadata: {
+              assistant_id: assistantId,
+              source: "deepagents-ui",
+              langgraph_thread_id: threadId, // Store LangGraph thread ID in metadata
+            },
+            participants: [
+              { role: "user", display_name: "User" },
+              {
+                role: "agent",
+                display_name: assistantName || "Research Agent",
+              },
+              { role: "tool", display_name: "Tools" },
+            ],
+          }),
+        });
+
+        if (response.ok) {
+          const data = (await response.json().catch(() => null)) as
+            | { id?: string; participants?: Array<{ id: string; role: string }> }
+            | null;
+          const serviceThreadId = data?.id;
+          if (serviceThreadId && !cancelled) {
+            createdThreadsRef.current.add(threadId);
+            threadIdMapRef.current = {
+              ...threadIdMapRef.current,
+              [threadId]: serviceThreadId,
+            };
+            persistThreadIdMap(threadIdMapRef.current);
+
+            // Store participant mapping
+            if (data?.participants) {
+              const roleMap: Record<string, string> = {};
+              for (const participant of data.participants) {
+                roleMap[participant.role] = participant.id;
+              }
+              participantMapRef.current[threadId] = roleMap;
+            } else {
+              // Fetch participants if not included in response
+              try {
+                const participantResponse = await fetch(
+                  `${THREAD_SERVICE_BASE_URL}/threads/${serviceThreadId}`,
+                  {
+                    headers: {
+                      Authorization: `Bearer ${accessToken}`,
+                      "Content-Type": "application/json",
+                    },
+                  }
+                );
+                if (participantResponse.ok) {
+                  const threadData = (await participantResponse.json()) as {
+                    participants?: Array<{ id: string; role: string }>;
+                  };
+                  if (threadData.participants) {
+                    const roleMap: Record<string, string> = {};
+                    for (const participant of threadData.participants) {
+                      roleMap[participant.role] = participant.id;
+                    }
+                    participantMapRef.current[threadId] = roleMap;
+                  }
+                }
+              } catch (error) {
+                console.warn("[ThreadService] Failed to load participant mapping", error);
+              }
+            }
+
+            console.log(
+              `[ThreadService] Created thread in database immediately for threadId: ${threadId}`
+            );
+          } else if (!cancelled) {
+            createdThreadsRef.current.add(threadId);
+          }
+        } else if (response.status === 409) {
+          // Thread already exists (might have been created by another process)
+          createdThreadsRef.current.add(threadId);
+          // Try to discover the existing thread
+          try {
+            const params = new URLSearchParams({
+              limit: "100",
+              offset: "0",
+            });
+            const discoveryResponse = await fetch(
+              `${THREAD_SERVICE_BASE_URL}/threads?${params.toString()}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+            if (discoveryResponse.ok) {
+              const data = (await discoveryResponse.json().catch(() => null)) as
+                | { threads?: Array<{ id: string; metadata?: Record<string, unknown>; participants?: Array<{ id: string; role: string }> }> }
+                | null;
+              const threads = data?.threads ?? [];
+              const match = threads.find(
+                (t) =>
+                  (t.metadata as any)?.langgraph_thread_id === threadId
+              );
+              if (match?.id && !cancelled) {
+                threadIdMapRef.current = {
+                  ...threadIdMapRef.current,
+                  [threadId]: match.id,
+                };
+                persistThreadIdMap(threadIdMapRef.current);
+
+                // Store participant mapping
+                if (match.participants) {
+                  const roleMap: Record<string, string> = {};
+                  for (const participant of match.participants) {
+                    roleMap[participant.role] = participant.id;
+                  }
+                  participantMapRef.current[threadId] = roleMap;
+                }
+              }
+            }
+          } catch (error) {
+            console.warn(
+              "[ThreadService] Failed to resolve existing thread by langgraph_thread_id",
+              error
+            );
+          }
+        } else {
+          const errorText = await response.text().catch(() => "Unknown error");
+          console.error(
+            `[ThreadService] Failed to create thread immediately: ${response.status} ${response.statusText}`,
+            errorText
+          );
+        }
+      } catch (error) {
+        console.error("[ThreadService] Failed to create thread immediately (network error)", error);
+      }
+    }
+
+    // Create thread immediately
+    createThreadImmediately();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId, accessToken, assistantId, assistantName]);
 
   useEffect(() => {
     // Check prerequisites for thread persistence
@@ -267,6 +475,8 @@ export function useThreadPersistence({
       // If we already resolved a thread-service UUID for this LangGraph thread, reuse it
       const existingId = threadIdMapRef.current[threadId];
       if (existingId) {
+        // Also ensure we have participant mapping for this thread
+        await loadParticipantMapping(threadId, existingId);
         return existingId;
       }
 
@@ -302,7 +512,7 @@ export function useThreadPersistence({
         });
         if (response.ok) {
           const data = (await response.json().catch(() => null)) as
-            | { id?: string }
+            | { id?: string; participants?: Array<{ id: string; role: string }> }
             | null;
           const serviceThreadId = data?.id;
           if (serviceThreadId) {
@@ -312,6 +522,19 @@ export function useThreadPersistence({
               [threadId]: serviceThreadId,
             };
             persistThreadIdMap(threadIdMapRef.current);
+            
+            // Store participant mapping
+            if (data?.participants) {
+              const roleMap: Record<string, string> = {};
+              for (const participant of data.participants) {
+                roleMap[participant.role] = participant.id;
+              }
+              participantMapRef.current[threadId] = roleMap;
+            } else {
+              // Fetch participants if not included in response
+              await loadParticipantMapping(threadId, serviceThreadId);
+            }
+            
             return serviceThreadId;
           }
           createdThreadsRef.current.add(threadId);
@@ -347,7 +570,7 @@ export function useThreadPersistence({
         );
         if (discoveryResponse.ok) {
           const data = (await discoveryResponse.json().catch(() => null)) as
-            | { threads?: Array<{ id: string; metadata?: Record<string, unknown> }> }
+            | { threads?: Array<{ id: string; metadata?: Record<string, unknown>; participants?: Array<{ id: string; role: string }> }> }
             | null;
           const threads = data?.threads ?? [];
           const match = threads.find(
@@ -360,6 +583,18 @@ export function useThreadPersistence({
               [threadId]: match.id,
             };
             persistThreadIdMap(threadIdMapRef.current);
+            
+            // Store participant mapping
+            if (match.participants) {
+              const roleMap: Record<string, string> = {};
+              for (const participant of match.participants) {
+                roleMap[participant.role] = participant.id;
+              }
+              participantMapRef.current[threadId] = roleMap;
+            } else {
+              await loadParticipantMapping(threadId, match.id);
+            }
+            
             return match.id;
           }
         }
@@ -371,6 +606,103 @@ export function useThreadPersistence({
       }
 
       return null;
+    }
+
+    async function loadParticipantMapping(langgraphThreadId: string, serviceThreadId: string): Promise<void> {
+      try {
+        const response = await fetch(
+          `${THREAD_SERVICE_BASE_URL}/threads/${serviceThreadId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        if (response.ok) {
+          const threadData = (await response.json()) as {
+            participants?: Array<{ id: string; role: string }>;
+          };
+          if (threadData.participants) {
+            const roleMap: Record<string, string> = {};
+            for (const participant of threadData.participants) {
+              roleMap[participant.role] = participant.id;
+            }
+            participantMapRef.current[langgraphThreadId] = roleMap;
+          }
+        }
+      } catch (error) {
+        console.warn("[ThreadService] Failed to load participant mapping", error);
+      }
+    }
+
+    async function updateThreadTitleIfNeeded(serviceThreadId: string): Promise<void> {
+      // Only update title if we can derive a better one from current messages
+      const derivedTitle = deriveThreadTitle(messages);
+      
+      // Skip update if still using default title (means we can't extract a better title yet)
+      if (derivedTitle === "Deep Research Thread") {
+        return;
+      }
+
+      try {
+        // Fetch current thread to check if title needs updating
+        const getResponse = await fetch(
+          `${THREAD_SERVICE_BASE_URL}/threads/${serviceThreadId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        if (getResponse.ok) {
+          const threadData = await getResponse.json();
+          const currentTitle = threadData.title || "";
+          
+          // Update title if it's still the default or empty
+          // Always update if current title is default to ensure threads get proper titles
+          if (!currentTitle || currentTitle === "Deep Research Thread" || currentTitle === "Untitled Thread") {
+            console.log(
+              `[ThreadService] Updating thread title from "${currentTitle}" to "${derivedTitle}"`
+            );
+            
+            const updateResponse = await fetch(
+              `${THREAD_SERVICE_BASE_URL}/threads/${serviceThreadId}`,
+              {
+                method: "PATCH",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({
+                  title: derivedTitle,
+                  summary: deriveSummary(messages),
+                }),
+              }
+            );
+
+            if (updateResponse.ok) {
+              console.log(`[ThreadService] Successfully updated thread title to "${derivedTitle}"`);
+            } else {
+              const errorText = await updateResponse.text().catch(() => "Unknown error");
+              console.warn(
+                `[ThreadService] Failed to update thread title: ${updateResponse.status} ${updateResponse.statusText}`,
+                errorText
+              );
+            }
+          } else {
+            // Title already set, no need to update
+            console.debug(
+              `[ThreadService] Thread already has title "${currentTitle}", skipping update`
+            );
+          }
+        }
+      } catch (error) {
+        // Silently fail - title update is not critical
+        console.warn("[ThreadService] Failed to update thread title", error);
+      }
     }
 
     async function syncMessages() {
@@ -402,16 +734,94 @@ export function useThreadPersistence({
         }
       }
 
+      // Ensure we have participant mapping before syncing messages
+      if (!participantMapRef.current[threadId]) {
+        await loadParticipantMapping(threadId, serviceThreadId);
+      }
+
       for (const message of newMessages) {
         if (!message.id) continue;
+        const role = mapParticipantRole(message);
+        const participantId = participantMapRef.current[threadId]?.[role] || null;
+        
+        // Build metadata with all available information
+        const metadata: Record<string, any> = {
+          source_message_type: message.type,
+          assistant_id: assistantId,
+        };
+
+        // Store tool calls from AI messages
+        // Tool calls can be in multiple places: message.tool_calls, message.additional_kwargs.tool_calls, or message.content (tool_use blocks)
+        if (message.type === "ai") {
+          const toolCalls: any[] = [];
+          
+          // Check message.tool_calls (primary location)
+          if (message.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+            toolCalls.push(...message.tool_calls);
+          }
+          
+          // Check additional_kwargs.tool_calls (alternative location)
+          if (message.additional_kwargs?.tool_calls && Array.isArray(message.additional_kwargs.tool_calls)) {
+            toolCalls.push(...message.additional_kwargs.tool_calls);
+          }
+          
+          // Check content array for tool_use blocks (Claude format)
+          if (Array.isArray(message.content)) {
+            const toolUseBlocks = message.content.filter(
+              (block: any) => block && typeof block === "object" && block.type === "tool_use"
+            );
+            if (toolUseBlocks.length > 0) {
+              toolCalls.push(...toolUseBlocks);
+            }
+          }
+          
+          // Store unique tool calls (deduplicate by id if available)
+          if (toolCalls.length > 0) {
+            const uniqueToolCalls = new Map<string, any>();
+            toolCalls.forEach((call: any) => {
+              const callId = call.id || call.tool_call_id || call.name || `tool-${Math.random()}`;
+              if (!uniqueToolCalls.has(callId)) {
+                uniqueToolCalls.set(callId, {
+                  id: call.id || call.tool_call_id || null,
+                  name: call.name || call.function?.name || "unknown_tool",
+                  args: call.args || call.function?.arguments || call.input || {},
+                  type: call.type || "function",
+                });
+              }
+            });
+            metadata.tool_calls = Array.from(uniqueToolCalls.values());
+          }
+        }
+
+        // Store tool call information for tool messages
+        if (message.type === "tool") {
+          const toolCallId = (message as any).tool_call_id || message.tool_call_id;
+          const toolName = (message as any).name || "unknown_tool";
+          
+          if (toolCallId) {
+            metadata.tool_call_id = toolCallId;
+          }
+          if (toolName) {
+            metadata.tool_name = toolName;
+          }
+        }
+
+        // Store additional metadata if available
+        if (message.additional_kwargs) {
+          // Merge additional_kwargs into metadata, but don't overwrite existing keys
+          Object.keys(message.additional_kwargs).forEach((key) => {
+            if (!metadata[key] && key !== "tool_calls") {
+              // tool_calls is already handled above for AI messages
+              metadata[key] = (message.additional_kwargs as any)[key];
+            }
+          });
+        }
+        
         const payload = {
-          participant_role: mapParticipantRole(message),
+          participant_id: participantId,
           kind: mapMessageKind(message),
           content: extractStringFromMessageContent(message.content),
-          metadata: {
-            source_message_type: message.type,
-            assistant_id: assistantId,
-          },
+          metadata,
           attachments: [],
         };
 
@@ -459,8 +869,8 @@ export function useThreadPersistence({
         }
       }
 
-      await ensureThreadExists();
-      if (cancelled) return;
+      const serviceThreadId = await ensureThreadExists();
+      if (cancelled || !serviceThreadId) return;
       
       // Wait for any previous sync to complete before starting a new one
       if (syncInProgressRef.current) {
@@ -477,6 +887,10 @@ export function useThreadPersistence({
       syncInProgressRef.current = syncMessages();
       await syncInProgressRef.current;
       syncInProgressRef.current = null;
+      
+      // Also check and update title even if no new messages were synced
+      // This handles the case where thread was created with default title but messages are already available
+      await updateThreadTitleIfNeeded(serviceThreadId);
     })();
     
     // Track the current sync operation

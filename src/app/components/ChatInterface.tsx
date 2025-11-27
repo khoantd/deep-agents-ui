@@ -298,10 +298,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
       [messages, threadId]
     );
 
-    const submitDisabled = isLoading || !assistant || isServiceOnly;
+    const submitDisabled = isLoading || !assistant;
+    // Note: isServiceOnly is no longer used to disable submission
+    // because we now create LangGraph threads for thread-service-only threads
 
     const handleSubmit = useCallback(
-      (e?: FormEvent) => {
+      async (e?: FormEvent) => {
         if (e) {
           e.preventDefault();
         }
@@ -318,7 +320,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
           };
           runSingleStep([newMessage]);
         } else {
-          newMessage = sendMessage(messageText);
+          newMessage = await sendMessage(messageText);
         }
         if (replyTarget?.id && newMessage?.id) {
           recordReply(replyTarget.id, newMessage.id);
@@ -404,7 +406,23 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
         string,
         { message: Message; toolCalls: ToolCall[] }
       >();
+      // Track seen message IDs to prevent duplicates
+      const seenMessageIds = new Set<string>();
+      
       messages.forEach((message: Message) => {
+        // Skip messages without IDs to prevent undefined keys
+        if (!message.id) {
+          console.warn("Skipping message without ID:", message);
+          return;
+        }
+        
+        // Skip duplicate message IDs (keep the first occurrence)
+        if (seenMessageIds.has(message.id)) {
+          console.warn(`Duplicate message ID detected: ${message.id}. Skipping duplicate.`);
+          return;
+        }
+        seenMessageIds.add(message.id);
+        
         if (message.type === "ai") {
           const toolCallsInMessage: Array<{
             id?: string;
@@ -484,7 +502,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
               } as ToolCall;
             }
           );
-          messageMap.set(message.id!, {
+          messageMap.set(message.id, {
             message,
             toolCalls: toolCallsWithStatus,
           });
@@ -508,7 +526,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
             break;
           }
         } else if (message.type === "human") {
-          messageMap.set(message.id!, {
+          messageMap.set(message.id, {
             message,
             toolCalls: [],
           });
@@ -709,9 +727,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
                   const isBookmarked = isMessageBookmarked(messageId);
                   const latestReply =
                     replies.length > 0 ? replies[replies.length - 1] : null;
+                  // Use composite key (messageId + index) to ensure uniqueness
+                  // This prevents React key conflicts if duplicate IDs somehow slip through
+                  const uniqueKey = `${messageId}-${index}`;
                   return (
                     <div
-                      key={messageId}
+                      key={uniqueKey}
                       ref={isHighlighted ? highlightedMessageRef : null}
                       className={cn(
                         "transition-colors duration-200",
@@ -1120,9 +1141,9 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
                   </p>
                 ) : (
                   <div className="space-y-3">
-                    {threadReplies.map((reply) => (
+                    {threadReplies.map((reply, replyIndex) => (
                       <div
-                        key={reply.id}
+                        key={reply.id ? `${reply.id}-${replyIndex}` : `reply-${replyIndex}`}
                         className="rounded border bg-background p-3 text-sm"
                       >
                         <p className="font-semibold text-primary">
@@ -1169,9 +1190,9 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(
           ) : (
             <ScrollArea className="max-h-[60vh] pr-3">
               <div className="space-y-3">
-                {bookmarkedMessages.map((message) => (
+                {bookmarkedMessages.map((message, bookmarkIndex) => (
                   <div
-                    key={message.id}
+                    key={message.id ? `${message.id}-${bookmarkIndex}` : `bookmark-${bookmarkIndex}`}
                     className="rounded border bg-muted/30 p-3 text-sm"
                   >
                     <p className="font-semibold text-primary">

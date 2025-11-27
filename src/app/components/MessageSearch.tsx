@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { Input } from "@/components/ui/input";
 import { Search, X, ChevronUp, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,15 @@ export function MessageSearch({
 }: MessageSearchProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentMatchIndex, setCurrentMatchIndex] = useState(-1);
+  
+  // Use refs to avoid infinite loops
+  const onMatchFoundRef = useRef(onMatchFound);
+  const previousMessageIdRef = useRef<string | null>(null);
+  
+  // Update ref when callback changes
+  useEffect(() => {
+    onMatchFoundRef.current = onMatchFound;
+  }, [onMatchFound]);
 
   // Notify parent of search query changes
   useEffect(() => {
@@ -65,15 +74,21 @@ export function MessageSearch({
     [matchingMessages.length]
   );
 
-  // Notify parent of current match
+  // Notify parent of current match - only when it actually changes
   useEffect(() => {
+    let currentMessageId: string | null = null;
+    
     if (matchingMessages.length > 0 && currentMatchIndex >= 0) {
       const match = matchingMessages[currentMatchIndex];
-      onMatchFound?.(match.message.id ?? null);
-    } else {
-      onMatchFound?.(null);
+      currentMessageId = match.message.id ?? null;
     }
-  }, [matchingMessages, currentMatchIndex, onMatchFound]);
+    
+    // Only call callback if the message ID actually changed
+    if (currentMessageId !== previousMessageIdRef.current) {
+      previousMessageIdRef.current = currentMessageId;
+      onMatchFoundRef.current?.(currentMessageId);
+    }
+  }, [matchingMessages, currentMatchIndex]);
 
   // Reset match index when search changes, but select first match if available
   useEffect(() => {

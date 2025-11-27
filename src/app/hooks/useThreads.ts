@@ -152,7 +152,9 @@ export function useThreads(props: {
             const threadsArray = threadServiceData.threads || [];
             console.log(`[ThreadService] Fetched ${threadsArray.length} threads from database (total: ${threadServiceData.total ?? 'unknown'})`);
             return threadsArray.map((thread: any): ThreadItem => {
-              const assistantIdFromMeta = thread.metadata?.assistant_id || config?.assistantId;
+              // Handle both metadata and custom_metadata field names (Pydantic can serialize either way)
+              const metadata = thread.metadata || thread.custom_metadata || {};
+              const assistantIdFromMeta = metadata.assistant_id || config?.assistantId;
               
               // Use thread service UUID as the ID (this is the database primary key)
               // The langgraph_thread_id is stored in metadata for reference
@@ -179,82 +181,6 @@ export function useThreads(props: {
           // Return empty array on error - don't fall back to LangGraph
           return [];
         }
-      } else if (key.kind === "langgraph") {
-        // Fetch from LangGraph (fallback)
-        let langGraphThreads: ThreadItem[] = [];
-        try {
-          const client = new Client({
-            apiUrl: deploymentUrl,
-            defaultHeaders: {
-              "X-Api-Key": apiKey,
-            },
-          });
-
-          const langGraphResults = await client.threads.search({
-            limit: pageSize,
-            offset: pageIndex * pageSize,
-            sortBy: "updated_at",
-            sortOrder: "desc",
-            status,
-            metadata: { assistant_id: assistantId },
-          });
-
-          langGraphThreads = langGraphResults.map((thread): ThreadItem => {
-            let title = "Untitled Thread";
-            let description = "";
-
-            try {
-              if (thread.values && typeof thread.values === "object") {
-                const values = thread.values as any;
-                const firstHumanMessage = values.messages.find(
-                  (m: any) => m.type === "human"
-                );
-                if (firstHumanMessage?.content) {
-                  const content =
-                    typeof firstHumanMessage.content === "string"
-                      ? firstHumanMessage.content
-                      : firstHumanMessage.content[0]?.text || "";
-                  title = content.slice(0, 50) + (content.length > 50 ? "..." : "");
-                }
-                const firstAiMessage = values.messages.find(
-                  (m: any) => m.type === "ai"
-                );
-                if (firstAiMessage?.content) {
-                  const content =
-                    typeof firstAiMessage.content === "string"
-                      ? firstAiMessage.content
-                      : firstAiMessage.content[0]?.text || "";
-                  description = content.slice(0, 100);
-                }
-              }
-            } catch {
-              title = `Thread ${thread.thread_id.slice(0, 8)}`;
-            }
-
-            return {
-              id: thread.thread_id,
-              updatedAt: new Date(thread.updated_at),
-              status: thread.status,
-              title,
-              description,
-              assistantId,
-            };
-          });
-        } catch (error) {
-          console.warn("[LangGraph] Failed to fetch threads from LangGraph", error);
-        }
-
-        // Merge and deduplicate: prioritize thread service threads, but include LangGraph threads not in thread service
-        const threadServiceThreadIds = new Set(threadServiceThreads.map(t => t.id));
-        const uniqueLangGraphThreads = langGraphThreads.filter(t => !threadServiceThreadIds.has(t.id));
-        
-        // Combine: thread service threads first (more up-to-date), then unique LangGraph threads
-        const merged = [...threadServiceThreads, ...uniqueLangGraphThreads];
-        
-        // Sort by updatedAt descending
-        merged.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
-        
-        return merged;
       } else if (key.kind === "langgraph") {
         // Fetch from LangGraph (fallback)
         const { deploymentUrl, assistantId, apiKey, status, pageIndex, pageSize } = key;
